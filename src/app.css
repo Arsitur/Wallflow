@@ -1,0 +1,10 @@
+@import "tailwindcss";
+
+@layer base {
+  html, body, #app {
+    @apply m-0 h-full w-full overflow-hidden bg-transparent;
+  }
+  body {
+    @apply font-sans text-white antialiased;
+  }
+}

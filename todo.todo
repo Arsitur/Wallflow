@@ -1,0 +1,27 @@
+Todo:
+  ☐ nu merge sa selectezi un wallpaper de pe al doilea monitor
+  ☐ sa se puna in ordine dupa ordinea in care sunt asezate in playlist
+  ☐ make a github repo si scrie un comentariu pe youtube ca sa spui la alti oameni ca ai facut ceva similar cu Wallpaper engine
+  ☐ hover la asta selectata seja arata ciudat
+  ☐ Sa fie abilitatea cand apesi click dreapta in taskbar sa apara si Settings
+  ☐ in settings vreau sa fie abilitatea cand schimbi un wallpaper.. sa pastreze setarile curente | no audio / pause
+  ☐ ceva window de logs pentru TOT, tot cand apas click dreapta sa fie un fel de debugger.. vreau sa adaugi console.logs or whatever pentru partile importante
+  ☐ pe langa asta cateodata cand apas Alt tab se aprinde cumva fara sa vreau selectorul.. pune ca sa nu pot deschide niciodata aplicatia asa...
+  ☐ vreu sa se deschida automat aplicatia la start-up.. dar sa inceapa minimizata..
+
+  ☐ selectarea nu respecta optiunile alese in wallpaper engine.. de exemplu daca in wallpaper engine aleg cover-ul sa fie alignment fill.. cand selectez din
+    - aplicatie toate setarile sunt pe default..
+
+  ☐ daca schimbi playlist-ul in aplicatie si nu o schimbi in wallpaper engine.. atunci daca walpaper-ul din engine atunci dupa un anumit timp se va seta la playlist-ul ala
+
+  extra:
+    ☐ as mai baga asa sa am muzica.. mai ales de la mili.. prosta bag un playlist de muzica si boom.. am si wallpaper dar si muzica valabila instant hehe
+      - adauga mili la la la la la
+      - adauga thunderstorm.. and rain
+
+
+  nup:
+      ☐ daca adaug itemi intrun playlist la care este selectat la moment, atunci nu se updateaza... vreau sa se updateze automat cand il deschid pentru itemii inexistenti
+    - fa asa incat sa nu updateze si alea care deja exista.. ca asa va trebui de mai multe ori sa reincarcam wallpaper-urile si va fi enervant
+    - la moment trebuie sa ies din aplicatie si sa o aprind din nou ca sa mearga
+    
