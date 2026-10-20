@@ -547,7 +547,19 @@ fn apply(app: &tauri::AppHandle, id: &str, monitor: u32, display: &str) -> Resul
     let launch = command_target(&record, &identity);
     if launch != identity { crate::diagnostics::record("debug", "apply", "Using project metadata to preserve the Unicode wallpaper filename"); }
     let preserve = crate::settings::preserve_playback(app);
-    crate::audio_transition::protect(&executable, preserve, || {
+    let paused = capture_pause(&executable, preserve);
+    if paused == Some(true) {
+        // Let the existing short exit animation finish before capturing pixels;
+        // do not preserve an image of the selector on the desktop itself.
+        if let Some(window) = app.get_webview_window("main") {
+            let start = std::time::Instant::now();
+            while window.is_visible().map_err(|e| e.to_string())? {
+                if start.elapsed() > std::time::Duration::from_millis(350) { return Err("Close the selector before switching a paused wallpaper".into()); }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+    }
+    change_with_playback(&executable, preserve, paused, || {
         if crate::settings::sync_playlist(app) {
             if let Some(selected) = selected_playlist(app) {
                 if config.monitor_playlists.get(&monitor).map(|playlist| &playlist.name) != Some(&selected) {
@@ -566,7 +578,7 @@ fn apply(app: &tauri::AppHandle, id: &str, monitor: u32, display: &str) -> Resul
         }
         Ok(())
     })?;
-    crate::diagnostics::record("info", "apply", format!("Applied {id} on Monitor{monitor}; preserved playback={preserve}"));
+    crate::diagnostics::record("info", "apply", format!("Applied {id} on Monitor{monitor}; preserve pause/sound={preserve}; captured pause={}", paused.map(|p| p.to_string()).unwrap_or_else(|| "unavailable".into())));
     Ok(())
 }
 
@@ -615,7 +627,53 @@ pub fn synchronize_playlist(app: &tauri::AppHandle, name: &str, display: &str) -
     let config = EngineConfig::read(&executable)?;
     let physical = config.monitor_index(display).or_else(|| single_monitor(&config)).ok_or("Cannot match the Settings display with Wallpaper Engine")?;
     let monitor = config.wallpaper_monitor(physical);
-    crate::audio_transition::protect(&executable, crate::settings::preserve_playback(app), || open_playlist(&executable, &config, name, monitor))
+    let preserve = crate::settings::preserve_playback(app);
+    let paused = capture_pause(&executable, preserve);
+    change_with_playback(&executable, preserve, paused, || open_playlist(&executable, &config, name, monitor))
+}
+
+fn change_with_playback(executable: &Path, preserve: bool, paused: Option<bool>, operation: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
+    let hold = if paused == Some(true) { Some(crate::frame_hold::Hold::begin(executable)?) } else { None };
+    crate::audio_transition::protect(executable, preserve, || {
+        if paused == Some(true) {
+            crate::diagnostics::record("debug", "playback", "Loading replacement behind a static desktop frame; no temporary Play command");
+        }
+        operation()
+    }, |result| {
+        let result = finish_playback(executable, paused, result);
+        if paused == Some(true) {
+            if let Err(error) = crate::playback_state::repaint_paused(executable) {
+                crate::diagnostics::record("warn", "playback", format!("Could not request a paused video repaint: {error}"));
+            }
+        }
+        if let Some(hold) = &hold { hold.settle_pause(); }
+        result
+    })
+}
+
+fn capture_pause(executable: &Path, preserve: bool) -> Option<bool> {
+    if !preserve { return None; }
+    match crate::playback_state::paused(executable) {
+        Ok(paused) => {
+            crate::diagnostics::record("debug", "playback", if paused { "Keeping manual pause after the wallpaper change" } else { "Keeping playback enabled; automatic performance rules remain in control" });
+            Some(paused)
+        }
+        Err(error) => {
+            // Audio protection remains available on an unrecognized future WE
+            // version. Never guess pause from CPU usage or automatic rules.
+            crate::diagnostics::record("warn", "playback", format!("Could not capture pause state; pause preservation is unavailable for this change: {error}"));
+            None
+        }
+    }
+}
+
+fn finish_playback(executable: &Path, paused: Option<bool>, result: Result<(), String>) -> Result<(), String> {
+    let restore = if paused == Some(true) { run_control(executable, &["-control", "pause"]) } else { Ok(()) };
+    match (result, restore) {
+        (Err(error), Err(restore)) => Err(format!("{error}; could not restore pause: {restore}")),
+        (Err(error), _) | (_, Err(error)) => Err(error),
+        _ => Ok(()),
+    }
 }
 
 fn display_args(monitor: u32, args: &[&str]) -> Vec<String> {
@@ -810,6 +868,79 @@ mod tests {
         let command = command_target(record, &identity);
         assert!(command.is_file());
         eprintln!("Discovered {}; command target {}", record.public.id, command.display());
+    }
+    #[test]
+    fn playing_or_disabled_preservation_never_forces_play_or_pause() {
+        let missing = Path::new("wallflow-test-engine-that-does-not-exist.exe");
+        assert_eq!(capture_pause(missing, false), None);
+        for paused in [None, Some(false)] {
+            assert!(finish_playback(missing, paused, Ok(())).is_ok());
+            assert_eq!(finish_playback(missing, paused, Err("Wallpaper failed".into())), Err("Wallpaper failed".into()));
+        }
+        let error = finish_playback(missing, Some(true), Err("Properties failed".into())).unwrap_err();
+        assert!(error.starts_with("Properties failed; could not restore pause:"));
+    }
+    #[test]
+    #[cfg(windows)]
+    #[ignore = "Reloads the current wallpaper in all pause/mute combinations; restores original manual state"]
+    fn preserves_manual_pause_when_reloading_the_live_wallpaper() {
+        let executable = engine_executable(&libraries()).unwrap();
+        let config = EngineConfig::read(&executable).unwrap();
+        let original = crate::playback_state::paused(&executable).unwrap();
+        let original_mute = crate::playback_state::muted(&executable).unwrap();
+        struct Restore<'a>(&'a Path, bool, bool, Option<(u32, PathBuf, Option<Value>)>);
+        impl Drop for Restore<'_> {
+            fn drop(&mut self) {
+                if let Some((monitor, target, properties)) = &self.3 {
+                    let _ = change_with_playback(self.0, true, Some(self.1), || {
+                        run_display_control(self.0, *monitor, &["-control", "openWallpaper", "-file", &target.to_string_lossy()])?;
+                        restore_properties(self.0, properties.clone(), *monitor)
+                    });
+                }
+                let _ = run_control(self.0, &["-control", if self.1 { "pause" } else { "play" }]);
+                let _ = run_control(self.0, &["-control", if self.2 { "mute" } else { "unmute" }]);
+            }
+        }
+        let mut restore = Restore(&executable, original, original_mute, None);
+        let monitor = *config.current.keys().min().unwrap();
+        let output = crate::engine_query::query(&executable, monitor).unwrap();
+        let file = wallpaper_output(&output).expect("Live wallpaper query must return a file");
+        let target = PathBuf::from(&file);
+        assert!(target.is_file());
+        let folder = target.parent().unwrap();
+        let record = project(folder, "local").expect("Current wallpaper must have project metadata");
+        let identity = launch_target(&record.target);
+        let launch = command_target(&record, &identity);
+        let replacements = if let Some(folder) = std::env::var_os("WALLFLOW_VIDEO_SWITCH_TEST_DIR") {
+            restore.3 = Some((monitor, launch, config.properties_for(&identity, monitor)));
+            ["red", "blue"].into_iter().map(|name| project(&PathBuf::from(&folder).join(name), "local").expect("Synthetic video fixture must have project metadata")).collect::<Vec<_>>()
+        } else { vec![record] };
+        for (paused, muted) in [(true, true), (true, false), (false, true), (false, false)] {
+          for record in &replacements {
+            let identity = launch_target(&record.target);
+            let launch = command_target(record, &identity);
+            run_control(&executable, &["-control", if paused { "pause" } else { "play" }]).unwrap();
+            run_control(&executable, &["-control", if muted { "mute" } else { "unmute" }]).unwrap();
+            assert_eq!(capture_pause(&executable, true), Some(paused));
+            change_with_playback(&executable, true, Some(paused), || {
+                assert_eq!(crate::playback_state::paused(&executable).unwrap(), paused, "Loading must never temporarily resume a paused wallpaper");
+                run_display_control(&executable, monitor, &["-control", "openWallpaper", "-file", &launch.to_string_lossy()])?;
+                // WE clears manual pause inside openWallpaper. A static cover
+                // must remain present until the final Pause has settled.
+                restore_properties(&executable, config.properties_for(&identity, monitor), monitor)
+            }).unwrap();
+            let live = wallpaper_output(&crate::engine_query::query(&executable, monitor).unwrap()).unwrap();
+            assert!(matches_file(record, &live), "Engine must select the replacement, not keep the previous video");
+            assert_eq!(crate::playback_state::paused(&executable).unwrap(), paused);
+            assert_eq!(crate::playback_state::muted(&executable).unwrap(), muted);
+            // The same control used by the Engine shortcut must remain usable
+            // after the renderer switch, in either playback state.
+            run_control(&executable, &["-control", if muted { "unmute" } else { "mute" }]).unwrap();
+            assert_eq!(crate::playback_state::muted(&executable).unwrap(), !muted);
+            assert_eq!(crate::playback_state::paused(&executable).unwrap(), paused);
+            eprintln!("Verified wallpaper reload and mute toggle on Monitor{monitor}: paused={paused}, initial mute={muted}");
+          }
+        }
     }
     #[test]
     #[cfg(windows)]

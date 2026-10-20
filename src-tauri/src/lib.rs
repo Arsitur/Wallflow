@@ -5,6 +5,8 @@ mod focus;
 mod engine_config;
 mod engine_query;
 mod audio_transition;
+mod playback_state;
+mod frame_hold;
 mod startup;
 mod lifecycle;
 mod settings;

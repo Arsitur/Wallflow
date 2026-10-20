@@ -195,7 +195,7 @@
     </label>
     <label class="flex items-start gap-3">
       <input type="checkbox" bind:checked={draftPreservePlayback} disabled={settingsBusy} class="mt-1 accent-white" />
-      <span>Preserve playback and mute state<span class="mt-1 block text-xs leading-5 text-zinc-400">Wallflow does not force Play or Unmute when changing wallpapers. Turn this off to resume playback and enable sound on all monitors.</span></span>
+      <span>Keep pause and sound settings<span class="mt-1 block text-xs leading-5 text-zinc-400">Paused stays paused. Playing stays playing. Muted stays muted when you switch wallpapers. Turn this off to resume playback and turn sound on for all monitors.</span></span>
     </label>
     <label class="flex items-start gap-3">
       <input type="checkbox" bind:checked={draftSyncPlaylist} disabled={settingsBusy} class="mt-1 accent-white" />

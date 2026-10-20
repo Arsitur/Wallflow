@@ -1,18 +1,18 @@
 //! Gate only Wallpaper Engine's Windows mixer sessions while a new renderer
-//! initializes. Its Ctrl+PgDn mute is internal and has no documented CLI query.
-//! Snapshot the mixer independently; never toggle or guess the internal state.
+//! initializes. Use temporary volume attenuation, never the mute switch that
+//! Wallpaper Engine and its Ctrl+PgDn shortcut also control.
 use std::{collections::HashMap, path::Path};
 
 trait Volume {
-    fn muted(&self) -> Result<bool, String>;
-    fn set_muted(&self, muted: bool) -> Result<(), String>;
+    fn level(&self) -> Result<f32, String>;
+    fn set_level(&self, level: f32) -> Result<(), String>;
 }
 
 struct Sessions<V: Volume> {
     active: bool,
-    originals: HashMap<String, (V, bool)>,
-    // New streams may inherit the mute we just set on the same application.
-    baselines: HashMap<String, Option<bool>>,
+    originals: HashMap<String, (V, f32)>,
+    // New streams may inherit the zero volume set on the same session group.
+    baselines: HashMap<String, Option<f32>>,
 }
 impl<V: Volume> Default for Sessions<V> {
     fn default() -> Self { Self { active: true, originals: HashMap::new(), baselines: HashMap::new() } }
@@ -20,23 +20,23 @@ impl<V: Volume> Default for Sessions<V> {
 impl<V: Volume> Sessions<V> {
     fn capture(&mut self, instance: String, owner: String, volume: V, new_session: bool) -> Result<(), String> {
         if !self.active || self.originals.contains_key(&instance) { return Ok(()); }
-        let muted = volume.muted()?;
+        let level = volume.level()?;
         let original = if new_session {
-            self.baselines.get(&owner).copied().flatten().unwrap_or(muted)
+            self.baselines.get(&owner).copied().flatten().unwrap_or(level)
         } else {
             self.baselines.entry(owner).and_modify(|baseline| {
-                if *baseline != Some(muted) { *baseline = None; }
-            }).or_insert(Some(muted));
-            muted
+                if *baseline != Some(level) { *baseline = None; }
+            }).or_insert(Some(level));
+            level
         };
-        volume.set_muted(true)?;
+        volume.set_level(0.0)?;
         self.originals.insert(instance, (volume, original));
         Ok(())
     }
     fn restore(&mut self) {
         self.active = false;
         for (_, (volume, original)) in self.originals.drain() {
-            if let Err(error) = volume.set_muted(original) {
+            if let Err(error) = volume.set_level(original) {
                 crate::diagnostics::record("warn", "audio", format!("Could not restore an audio session (it may have closed): {error}"));
             }
         }
@@ -44,13 +44,22 @@ impl<V: Volume> Sessions<V> {
 }
 impl<V: Volume> Drop for Sessions<V> { fn drop(&mut self) { self.restore(); } }
 
-pub fn protect<T>(executable: &Path, enabled: bool, operation: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
-    if !enabled { return operation(); }
-    let mut guard = native::Guard::begin(executable).map_err(|e| format!("Could not protect Wallpaper Engine audio before switching: {e}"))?;
+// Finalize renderer state after startup, but before restoring audible levels.
+// A paused transition remains visually frozen by frame_hold while WE loads.
+pub fn protect<T>(executable: &Path, enabled: bool, operation: impl FnOnce() -> Result<T, String>, finish: impl FnOnce(Result<T, String>) -> Result<T, String>) -> Result<T, String> {
+    if !enabled { return finish(operation()); }
+    let guard = native::Guard::begin(executable).map_err(|e| format!("Could not protect Wallpaper Engine audio before switching: {e}"))?;
+    guarded(guard, operation, finish)
+}
+
+trait StartupGuard { fn settle(&mut self); }
+impl StartupGuard for native::Guard { fn settle(&mut self) { native::Guard::settle(self); } }
+fn guarded<T>(mut guard: impl StartupGuard, operation: impl FnOnce() -> Result<T, String>, finish: impl FnOnce(Result<T, String>) -> Result<T, String>) -> Result<T, String> {
     let result = operation();
     // openWallpaper acknowledges the command before Media Foundation has fully
     // initialized. Cover that startup window as well as applyProperties.
     guard.settle();
+    let result = finish(result);
     drop(guard); // Restore even when openWallpaper/applyProperties failed.
     result
 }
@@ -80,8 +89,8 @@ mod native {
     const CONTEXT: GUID = GUID::from_u128(0x4f30bb54_5ca7_4c5a_b8f1_e60cb4ec0ce0);
 
     impl Volume for ISimpleAudioVolume {
-        fn muted(&self) -> Result<bool, String> { unsafe { self.GetMute().map(|value| value.as_bool()).map_err(|e| e.to_string()) } }
-        fn set_muted(&self, muted: bool) -> Result<(), String> { unsafe { self.SetMute(muted, &CONTEXT).map_err(|e| e.to_string()) } }
+        fn level(&self) -> Result<f32, String> { unsafe { self.GetMasterVolume().map_err(|e| e.to_string()) } }
+        fn set_level(&self, level: f32) -> Result<(), String> { unsafe { self.SetMasterVolume(level, &CONTEXT).map_err(|e| e.to_string()) } }
     }
 
     struct State { sessions: Sessions<ISimpleAudioVolume>, last_session: Instant }
@@ -164,7 +173,7 @@ mod native {
                 }
             }
             let count = guard.state.lock().map_err(|e| e.to_string())?.sessions.originals.len();
-            crate::diagnostics::record("debug", "audio", format!("Audio guard armed before switch: {count} Wallpaper Engine sessions; watching for new streams"));
+            crate::diagnostics::record("debug", "audio", format!("Audio volume guard armed before switch: {count} Wallpaper Engine sessions; mute controls remain independent"));
             Ok(guard)
         }
         pub fn settle(&mut self) {
@@ -185,10 +194,42 @@ mod native {
                     crate::diagnostics::record("warn", "audio", format!("Could not unregister audio notifications: {error}"));
                 }
             }
-            crate::diagnostics::record("debug", "audio", "Audio guard released; previous Windows mixer mute state restored");
+            crate::diagnostics::record("debug", "audio", "Audio volume guard released; original levels restored without changing mute");
         }
     }
 
+    #[cfg(test)]
+    #[test]
+    #[ignore = "Installed audio diagnostics; explicit WALLFLOW_REPAIR_STUCK_MUTE=1 repairs old guard mute when WE itself is unmuted"]
+    fn installed_audio_session_state() {
+        let executable = PathBuf::from(std::env::var_os("WALLFLOW_ENGINE_TEST_EXE").unwrap());
+        let folder = executable.parent().unwrap();
+        let repair = std::env::var("WALLFLOW_REPAIR_STUCK_MUTE").ok().as_deref() == Some("1");
+        if repair { assert!(!crate::playback_state::muted(&executable).expect("Must verify Engine is unmuted before repairing stale mixer mute")); }
+        unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).ok().unwrap(); }
+        let _com = Com;
+        unsafe {
+            let devices: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).unwrap();
+            let endpoints = devices.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE).unwrap();
+            for index in 0..endpoints.GetCount().unwrap() {
+                let manager: IAudioSessionManager2 = endpoints.Item(index).unwrap().Activate(CLSCTX_ALL, None).unwrap();
+                let sessions = manager.GetSessionEnumerator().unwrap();
+                for i in 0..sessions.GetCount().unwrap() {
+                    let control: IAudioSessionControl2 = sessions.GetSession(i).unwrap().cast().unwrap();
+                    let pid = control.GetProcessId().unwrap();
+                    if process_path(pid).is_some_and(|p| is_engine_process(&folder, &p)) {
+                        let volume: ISimpleAudioVolume = control.cast().unwrap();
+                        println!("Endpoint {index} engine PID {pid}: mute={}, volume={}, state={:?}", volume.GetMute().unwrap().as_bool(), volume.GetMasterVolume().unwrap(), control.GetState().unwrap());
+                        if repair && volume.GetMute().unwrap().as_bool() {
+                            volume.SetMute(false, &CONTEXT).unwrap();
+                            assert!(!volume.GetMute().unwrap().as_bool());
+                            println!("Cleared stale Windows mixer mute for this Wallpaper Engine session");
+                        }
+                    }
+                }
+            }
+        }
+    }
     #[cfg(test)]
     #[test]
     #[ignore = "requires an interactive Windows audio endpoint; run a copy of the test executable named wallpaper64.exe from an isolated test folder"]
@@ -219,16 +260,23 @@ mod native {
             let (first, first_volume) = silent_client(&device, &GUID::from_u128(0x11abf6b1_bb4d_4648_a444_87eb5681d4de));
             first_volume.SetMute(false, &CONTEXT).unwrap();
             let mut guard = Guard::begin(&executable).unwrap();
-            assert!(first_volume.GetMute().unwrap().as_bool(), "Existing stream must be muted before switching");
+            assert_eq!(first_volume.GetMasterVolume().unwrap(), 0.0, "Existing stream must be silent before switching");
+            assert!(!first_volume.GetMute().unwrap().as_bool(), "The guard must not change mute");
             let (second, second_volume) = silent_client(&device, &GUID::from_u128(0xc9902204_64b6_40fb_8dd1_871e8d371abc));
             let start = Instant::now();
-            while !second_volume.GetMute().unwrap().as_bool() && start.elapsed() < Duration::from_secs(2) {
+            while second_volume.GetMasterVolume().unwrap() != 0.0 && start.elapsed() < Duration::from_secs(2) {
                 std::thread::sleep(Duration::from_millis(10));
             }
-            assert!(second_volume.GetMute().unwrap().as_bool(), "A new stream must be captured by the notification callback");
+            assert_eq!(second_volume.GetMasterVolume().unwrap(), 0.0, "A new stream must be captured by the notification callback");
+            // Simulate an engine mute change during switching: restoring levels
+            // must not undo the shortcut's decision, even on another stream.
+            first_volume.SetMute(true, &CONTEXT).unwrap();
+            second_volume.SetMute(false, &CONTEXT).unwrap();
             guard.settle();
             drop(guard);
-            assert!(!first_volume.GetMute().unwrap().as_bool());
+            assert_eq!(first_volume.GetMasterVolume().unwrap(), 1.0);
+            assert_eq!(second_volume.GetMasterVolume().unwrap(), 1.0);
+            assert!(first_volume.GetMute().unwrap().as_bool());
             assert!(!second_volume.GetMute().unwrap().as_bool());
             first.Stop().unwrap();
             second.Stop().unwrap();
@@ -250,70 +298,109 @@ mod tests {
     use super::*;
     use std::{cell::Cell, rc::Rc};
 
+    #[test]
+    fn startup_finishes_before_restoring_pause_and_sound_even_on_failure() {
+        use std::cell::RefCell;
+        struct Guard(Rc<RefCell<Vec<&'static str>>>);
+        impl StartupGuard for Guard { fn settle(&mut self) { self.0.borrow_mut().push("video startup"); } }
+        impl Drop for Guard { fn drop(&mut self) { self.0.borrow_mut().push("restore volume"); } }
+        for fail in [false, true] {
+            let steps = Rc::new(RefCell::new(Vec::new()));
+            let result = guarded(Guard(steps.clone()), || {
+                steps.borrow_mut().push("open replacement without changing pause");
+                if fail { Err("Loading failed".to_owned()) } else { Ok(()) }
+            }, |result| {
+                steps.borrow_mut().push("restore pause");
+                result
+            });
+            assert_eq!(result.is_err(), fail);
+            assert_eq!(*steps.borrow(), ["open replacement without changing pause", "video startup", "restore pause", "restore volume"]);
+        }
+    }
+
     #[derive(Clone)]
-    struct FakeVolume { muted: Rc<Cell<bool>>, fail: bool }
+    struct FakeVolume { level: Rc<Cell<f32>>, muted: Rc<Cell<bool>>, fail: bool }
     impl FakeVolume {
-        fn new(muted: bool) -> Self { Self { muted: Rc::new(Cell::new(muted)), fail: false } }
+        fn new(level: f32, muted: bool) -> Self { Self { level: Rc::new(Cell::new(level)), muted: Rc::new(Cell::new(muted)), fail: false } }
     }
     impl Volume for FakeVolume {
-        fn muted(&self) -> Result<bool, String> { Ok(self.muted.get()) }
-        fn set_muted(&self, muted: bool) -> Result<(), String> {
+        fn level(&self) -> Result<f32, String> { Ok(self.level.get()) }
+        fn set_level(&self, level: f32) -> Result<(), String> {
             if self.fail { return Err("device unavailable".into()); }
-            self.muted.set(muted);
+            self.level.set(level);
             Ok(())
         }
     }
     #[test]
-    fn mutes_before_switch_and_restores_both_muted_and_unmuted_sessions() {
-        let unmuted = FakeVolume::new(false);
-        let muted = FakeVolume::new(true);
+    fn silences_before_switch_and_restores_levels_without_changing_mute() {
+        let unmuted = FakeVolume::new(0.7, false);
+        let muted = FakeVolume::new(0.3, true);
         let mut gate = Sessions::default();
         gate.capture("a".into(), "engine".into(), unmuted.clone(), false).unwrap();
         gate.capture("b".into(), "engine".into(), muted.clone(), false).unwrap();
-        assert!(unmuted.muted.get() && muted.muted.get());
+        assert_eq!(unmuted.level.get(), 0.0);
+        assert_eq!(muted.level.get(), 0.0);
+        assert!(!unmuted.muted.get() && muted.muted.get());
         gate.restore();
         assert!(!unmuted.muted.get());
         assert!(muted.muted.get());
+        assert_eq!(unmuted.level.get(), 0.7);
+        assert_eq!(muted.level.get(), 0.3);
     }
     #[test]
-    fn a_recreated_stream_does_not_keep_the_guards_inherited_mute() {
-        let original = FakeVolume::new(false);
-        let new_stream = FakeVolume::new(true); // Inherited our Windows mixer mute.
+    fn a_recreated_stream_does_not_keep_the_guards_inherited_zero_volume() {
+        let original = FakeVolume::new(0.8, false);
+        let new_stream = FakeVolume::new(0.0, false);
         let mut gate = Sessions::default();
         gate.capture("old".into(), "engine".into(), original.clone(), false).unwrap();
         gate.capture("new".into(), "engine".into(), new_stream.clone(), true).unwrap();
         gate.restore();
-        assert!(!original.muted.get());
-        assert!(!new_stream.muted.get());
+        assert_eq!(original.level.get(), 0.8);
+        assert_eq!(new_stream.level.get(), 0.8);
     }
     #[test]
     fn duplicate_notifications_do_not_overwrite_the_original_state() {
-        let volume = FakeVolume::new(false);
+        let volume = FakeVolume::new(0.4, false);
         let mut gate = Sessions::default();
         gate.capture("a".into(), "engine".into(), volume.clone(), false).unwrap();
         gate.capture("a".into(), "engine".into(), volume.clone(), true).unwrap();
         drop(gate);
-        assert!(!volume.muted.get());
+        assert_eq!(volume.level.get(), 0.4);
     }
     #[test]
-    fn partial_setup_failure_restores_previously_muted_sessions_on_drop() {
-        let volume = FakeVolume::new(false);
+    fn partial_setup_failure_restores_previously_silenced_sessions_on_drop() {
+        let volume = FakeVolume::new(0.5, false);
         let result = (|| -> Result<(), String> {
             let mut gate = Sessions::default();
             gate.capture("a".into(), "engine".into(), volume.clone(), false)?;
-            gate.capture("b".into(), "other".into(), FakeVolume { fail: true, ..FakeVolume::new(false) }, false)?;
+            gate.capture("b".into(), "other".into(), FakeVolume { fail: true, ..FakeVolume::new(1.0, false) }, false)?;
             Ok(())
         })();
         assert!(result.is_err());
-        assert!(!volume.muted.get());
+        assert_eq!(volume.level.get(), 0.5);
     }
     #[test]
-    fn late_callbacks_after_restore_cannot_mute_a_session_again() {
-        let volume = FakeVolume::new(false);
+    fn late_callbacks_after_restore_cannot_silence_a_session_again() {
+        let volume = FakeVolume::new(0.9, false);
         let mut gate = Sessions::default();
         gate.restore();
         gate.capture("late".into(), "engine".into(), volume.clone(), true).unwrap();
-        assert!(!volume.muted.get());
+        assert_eq!(volume.level.get(), 0.9);
+    }
+    #[test]
+    fn mute_and_unmute_during_a_switch_survive_restoration() {
+        for original_mute in [false, true] {
+            let volume = FakeVolume::new(0.6, original_mute);
+            let mut gate = Sessions::default();
+            gate.capture("a".into(), "engine".into(), volume.clone(), false).unwrap();
+            volume.muted.set(!original_mute); // Wallpaper Engine's shortcut.
+            gate.restore();
+            assert_eq!(volume.muted.get(), !original_mute);
+            assert_eq!(volume.level.get(), 0.6);
+            // It must remain possible to toggle after the guard has gone, too.
+            volume.muted.set(original_mute);
+            assert_eq!(volume.muted.get(), original_mute);
+        }
     }
     #[test]
     fn only_known_renderer_executables_inside_engine_folder_match() {

@@ -103,7 +103,7 @@ For a nicer wallpaper switch, choose a transition in **Wallpaper Engine → Sett
 - **Save your playlist in Wallpaper Engine after editing it**, including after adding a scene. Some additions can appear live before saving, but saving is needed for reliable synchronization of a named playlist.
 - **Scene covers use original artwork or reconstructed HD image layers**, including groups and rotated layers. Complete HD compositions come from the scene itself, so promotional text or collages in Workshop thumbnails do not force a tiny cover. Live 3D scenes and unsupported formats can still fall back to the author's preview; animation, live text, customizations, and shader effects can differ. Video covers use FFmpeg if it is already installed; it is optional.
 - **Settings → Rebuild covers** clears generated covers and refreshes both disk and in-memory cache identities. Updated cover algorithms automatically use a fresh cache generation.
-- **Settings → Preserve playback and mute state** is enabled by default. Leave it on if you want your pause / mute choices to carry across wallpaper changes.
+- **Settings → Keep pause and sound settings** is enabled by default. A paused wallpaper stays paused after a switch; playing stays playing, and muted stays muted. Turn it off to resume playback and enable sound on all monitors.
 - If a change fails, check **Logs / Debugger** from the tray menu. Logs include local file paths, so review them before sharing.
 
 ## 🎨 For the full desktop look
