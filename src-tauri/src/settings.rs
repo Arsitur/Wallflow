@@ -4,9 +4,9 @@ use tauri::{Manager, State};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
 
 pub const DEFAULT_SHORTCUT: &str = "Ctrl+Alt+G";
-pub struct SettingsState { shortcut: Mutex<String>, preserve_playback: AtomicBool, sync_playlist: AtomicBool, recording_shortcut: AtomicBool }
+pub struct SettingsState { shortcut: Mutex<String>, preserve_playback: AtomicBool, sync_playlist: AtomicBool, amazing_animations: AtomicBool, recording_shortcut: AtomicBool }
 impl Default for SettingsState {
-    fn default() -> Self { Self { shortcut: Mutex::new(String::new()), preserve_playback: AtomicBool::new(true), sync_playlist: AtomicBool::new(true), recording_shortcut: AtomicBool::new(false) } }
+    fn default() -> Self { Self { shortcut: Mutex::new(String::new()), preserve_playback: AtomicBool::new(true), sync_playlist: AtomicBool::new(true), amazing_animations: AtomicBool::new(true), recording_shortcut: AtomicBool::new(false) } }
 }
 pub fn recording_shortcut(app: &tauri::AppHandle) -> bool { app.state::<SettingsState>().recording_shortcut.load(Ordering::Acquire) }
 pub fn stop_recording(app: &tauri::AppHandle) { app.state::<SettingsState>().recording_shortcut.store(false, Ordering::Release); }
@@ -19,9 +19,10 @@ pub fn set_shortcut_recording(window: tauri::WebviewWindow, state: State<'_, Set
 }
 pub fn preserve_playback(app: &tauri::AppHandle) -> bool { app.state::<SettingsState>().preserve_playback.load(Ordering::Acquire) }
 pub fn sync_playlist(app: &tauri::AppHandle) -> bool { app.state::<SettingsState>().sync_playlist.load(Ordering::Acquire) }
+pub fn amazing_animations(app: &tauri::AppHandle) -> bool { app.state::<SettingsState>().amazing_animations.load(Ordering::Acquire) }
 
 #[derive(Serialize)]
-pub struct SettingsInfo { pub playlist: Option<String>, pub shortcut: String, pub playlists: Vec<String>, pub preserve_playback: bool, pub sync_playlist: bool, pub start_with_windows: bool, pub display_mode: &'static str }
+pub struct SettingsInfo { pub playlist: Option<String>, pub shortcut: String, pub playlists: Vec<String>, pub preserve_playback: bool, pub sync_playlist: bool, pub amazing_animations: bool, pub start_with_windows: bool, pub display_mode: &'static str }
 
 pub fn show(app: &tauri::AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("settings") {
@@ -47,6 +48,7 @@ pub fn initialize(app: &tauri::AppHandle) {
         .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok()).unwrap_or_default();
     app.state::<SettingsState>().preserve_playback.store(saved["preserve_playback"].as_bool().unwrap_or(true), Ordering::Release);
     app.state::<SettingsState>().sync_playlist.store(saved["sync_playlist"].as_bool().unwrap_or(true), Ordering::Release);
+    app.state::<SettingsState>().amazing_animations.store(saved["amazing_animations"].as_bool().unwrap_or(true), Ordering::Release);
     let shortcut = saved["shortcut"].as_str().map(str::to_owned)
         .filter(|value| validate_shortcut(value).is_ok()).unwrap_or_else(|| DEFAULT_SHORTCUT.into());
     *app.state::<SettingsState>().shortcut.lock().unwrap() = shortcut.clone();
@@ -55,24 +57,24 @@ pub fn initialize(app: &tauri::AppHandle) {
 
 #[tauri::command]
 pub fn get_settings(app: tauri::AppHandle, state: State<'_, SettingsState>) -> Result<SettingsInfo, String> {
-    Ok(SettingsInfo { playlist: crate::wallpaper::selected_playlist(&app), shortcut: state.shortcut.lock().map_err(|e| e.to_string())?.clone(), playlists: crate::wallpaper::playlist_names(&app)?, preserve_playback: preserve_playback(&app), sync_playlist: sync_playlist(&app), start_with_windows: crate::startup::enabled()?, display_mode: crate::wallpaper::display_mode(&app)? })
+    Ok(SettingsInfo { playlist: crate::wallpaper::selected_playlist(&app), shortcut: state.shortcut.lock().map_err(|e| e.to_string())?.clone(), playlists: crate::wallpaper::playlist_names(&app)?, preserve_playback: preserve_playback(&app), sync_playlist: sync_playlist(&app), amazing_animations: amazing_animations(&app), start_with_windows: crate::startup::enabled()?, display_mode: crate::wallpaper::display_mode(&app)? })
 }
 
-fn persist(app: &tauri::AppHandle, playlist: &Option<String>, shortcut: &str, preserve: bool, sync: bool) -> Result<(), String> {
+fn persist(app: &tauri::AppHandle, playlist: &Option<String>, shortcut: &str, preserve: bool, sync: bool, animations: bool) -> Result<(), String> {
     let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let temporary = dir.join("gallery.json.tmp");
-    fs::write(&temporary, serde_json::to_vec_pretty(&serde_json::json!({"playlist":playlist,"shortcut":shortcut,"preserve_playback":preserve,"sync_playlist":sync})).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    fs::write(&temporary, serde_json::to_vec_pretty(&serde_json::json!({"playlist":playlist,"shortcut":shortcut,"preserve_playback":preserve,"sync_playlist":sync,"amazing_animations":animations})).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     fs::rename(temporary, dir.join("gallery.json")).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn save_settings(app: tauri::AppHandle, window: tauri::WebviewWindow, playlist: Option<String>, shortcut: String, preserve_playback: bool, sync_playlist: bool, start_with_windows: bool) -> Result<(), String> {
+pub async fn save_settings(app: tauri::AppHandle, window: tauri::WebviewWindow, playlist: Option<String>, shortcut: String, preserve_playback: bool, sync_playlist: bool, amazing_animations: bool, start_with_windows: bool) -> Result<(), String> {
     let display = window.current_monitor().map_err(|e| e.to_string())?.and_then(|monitor| monitor.name().cloned()).ok_or("Settings display is unavailable")?;
-    tauri::async_runtime::spawn_blocking(move || save(&app, playlist, shortcut, preserve_playback, sync_playlist, start_with_windows, &display)).await.map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || save(&app, playlist, shortcut, preserve_playback, sync_playlist, amazing_animations, start_with_windows, &display)).await.map_err(|e| e.to_string())?
 }
 
-fn save(app: &tauri::AppHandle, playlist: Option<String>, shortcut: String, preserve: bool, sync: bool, start_with_windows: bool, display: &str) -> Result<(), String> {
+fn save(app: &tauri::AppHandle, playlist: Option<String>, shortcut: String, preserve: bool, sync: bool, animations: bool, start_with_windows: bool, display: &str) -> Result<(), String> {
     let state = app.state::<SettingsState>();
     let new = validate_shortcut(&shortcut)?;
     if let Some(name) = &playlist {
@@ -84,14 +86,14 @@ fn save(app: &tauri::AppHandle, playlist: Option<String>, shortcut: String, pres
     let mut startup_change = crate::startup::Change::apply(start_with_windows)?;
     // Register first: a conflicting shortcut cannot remove the existing working binding.
     if changed { crate::register_shortcut(&app, &shortcut).map_err(|e| format!("Shortcut unavailable: {e}. Your previous shortcut is still active."))?; }
-    if let Err(error) = persist(app, &playlist, shortcut.trim(), preserve, sync) {
+    if let Err(error) = persist(app, &playlist, shortcut.trim(), preserve, sync, animations) {
         if changed { let _ = app.global_shortcut().unregister(new); }
         return Err(error);
     }
     if changed {
         if let Err(error) = app.global_shortcut().unregister(old) {
             let _ = app.global_shortcut().unregister(new);
-            let _ = persist(app, &crate::wallpaper::selected_playlist(app), &current, preserve_playback(app), sync_playlist(app));
+            let _ = persist(app, &crate::wallpaper::selected_playlist(app), &current, preserve_playback(app), sync_playlist(app), amazing_animations(app));
             return Err(format!("Could not replace the shortcut: {error}"));
         }
     }
@@ -99,7 +101,7 @@ fn save(app: &tauri::AppHandle, playlist: Option<String>, shortcut: String, pres
         if let Some(name) = &playlist {
             if let Err(error) = crate::wallpaper::synchronize_playlist(app, name, display) {
                 if changed { let _ = app.global_shortcut().unregister(new); let _ = crate::register_shortcut(app, &current); }
-                let _ = persist(app, &crate::wallpaper::selected_playlist(app), &current, preserve_playback(app), sync_playlist(app));
+                let _ = persist(app, &crate::wallpaper::selected_playlist(app), &current, preserve_playback(app), sync_playlist(app), amazing_animations(app));
                 crate::diagnostics::record("error", "playlist", &error);
                 return Err(error);
             }
@@ -108,9 +110,10 @@ fn save(app: &tauri::AppHandle, playlist: Option<String>, shortcut: String, pres
     crate::wallpaper::set_playlist(app, playlist.clone())?;
     state.preserve_playback.store(preserve, Ordering::Release);
     state.sync_playlist.store(sync, Ordering::Release);
+    state.amazing_animations.store(animations, Ordering::Release);
     *current = shortcut.trim().to_owned();
     startup_change.commit();
-    crate::diagnostics::record("info", "settings", format!("Saved playlist={playlist:?}, shortcut={shortcut}, preserve playback={preserve}, sync playlist={sync}, start with Windows={start_with_windows}"));
+    crate::diagnostics::record("info", "settings", format!("Saved playlist={playlist:?}, shortcut={shortcut}, preserve playback={preserve}, sync playlist={sync}, amazing animations={animations}, start with Windows={start_with_windows}"));
     Ok(())
 }
 
