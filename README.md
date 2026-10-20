@@ -16,9 +16,9 @@ I watched [this YouTube video](https://www.youtube.com/watch?v=kYZ5mkGuQEg), saw
 
 Normally, I do not vibe-code entire applications. This time I was tired, wanted the thing to exist, and decided to see what GPT-6.1 could do. The result is an entirely vibe-coded app, tested and adjusted until it worked the way I wanted.
 
-Future maintainers: I am sorry. Some of the Rust still looks like an infinite line of functions to me. My future job is in its coffin, screaming for help. 💀
+Future maintainers: I am sorry 💀
 
-I tested it briefly on **Windows 11 with two monitors**, and it works on my setup. Everyone else's setup: 🫡
+I tested it briefly on **Windows 11 with two monitors**, and it works on my setup. Good luck 🫡
 
 — [Arsitur](https://github.com/Arsitur)
 
