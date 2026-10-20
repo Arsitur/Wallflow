@@ -172,7 +172,7 @@ fn active_record(records: &HashMap<String, WallpaperRecord>, live: Option<&str>,
 #[derive(Serialize)]
 pub struct GallerySnapshot {
     items: Vec<WallpaperItem>, active_id: Option<String>, playlist: Option<String>, monitor: u32,
-    display_mode: &'static str,
+    display_mode: &'static str, amazing_animations: bool,
 }
 
 #[tauri::command]
@@ -205,7 +205,7 @@ pub async fn gallery_snapshot(app: tauri::AppHandle) -> Result<GallerySnapshot, 
         let active_id = active_record(&records, live.as_deref(), current.as_deref())
             .filter(|id| items.iter().any(|item| &item.id == id));
         crate::diagnostics::record("info", "snapshot", format!("Display {monitor_name} (Monitor{physical}) -> renderer Monitor{monitor}; mode={display_mode}; playlist={playlist:?}; {} items; active={active_id:?}; live query={}", items.len(), live.is_some()));
-        Ok(GallerySnapshot { items, active_id, playlist, monitor, display_mode })
+        Ok(GallerySnapshot { items, active_id, playlist, monitor, display_mode, amazing_animations: crate::settings::amazing_animations(&app) })
     }).await.map_err(|e| e.to_string())?
 }
 
