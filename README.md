@@ -6,9 +6,9 @@ A smooth wallpaper selector for **Wallpaper Engine on Windows**. Open it, scroll
 
 ## 🎬 Demo
 
-**Demo video goes here.** I will add a quick showcase of Wallflow in action.
 
-<!-- Replace the paragraph above with your Wallflow demo video link after uploading it. -->
+https://github.com/user-attachments/assets/91aeaad5-0608-4479-b76a-682bc37f02ad
+
 
 ## From the author
 
