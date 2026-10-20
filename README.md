@@ -90,6 +90,8 @@ For anyone wondering, this is the playback setup I tested with:
 
 These are the settings I tested; other combinations are unverified.
 
+For a nicer wallpaper switch, choose a transition in **Wallpaper Engine → Settings → General → Basic Setup → Wallpaper browser transition**. I personally use **Boilover**—a good transition makes the whole experience feel that much smoother.
+
 **Playlist timers still belong to Wallpaper Engine.** A very short automatic-change interval can switch the wallpaper while you are browsing the selector. For the nicest experience, use a longer interval or disable automatic changes.
 
 ## A few things to know
