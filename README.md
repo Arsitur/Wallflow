@@ -26,7 +26,8 @@ I tested it briefly on **Windows 11 with two monitors**, and it works on my setu
 
 - A transparent, animated carousel with smooth scrolling, dragging and keyboard navigation.
 - Workshop wallpapers and local Wallpaper Engine projects, with playlists shown in their saved order.
-- Quick blurred cover previews while higher-resolution artwork loads.
+- Quick blurred previews while sharp covers load, using original artwork up to 2560 × 1440.
+- Optional **Amazing animations**: covers smoothly pan from left to center to right as you scroll. Enabled by default; respects Windows reduced-motion preferences.
 - Opens on the display you are using and starts at its current wallpaper when that wallpaper belongs to your selected playlist.
 - Preserves playback and mute state by default, restores saved wallpaper properties, and can synchronize your playlist with Wallpaper Engine.
 - Starts quietly in the system tray. Choose a wallpaper and the selector fades away immediately while the change finishes in the background.
@@ -96,7 +97,8 @@ These are the settings I tested; other combinations are unverified.
 - **Loose video files are not picked up by the library scan.** For a personal video, create a local project in the Wallpaper Engine editor, then add it to your playlist. Video wallpapers packaged as projects are supported.
 - **Wallpaper Engine's built-in default wallpapers are intentionally excluded.**
 - **Save your playlist in Wallpaper Engine after editing it**, including after adding a scene. Some additions can appear live before saving, but saving is needed for reliable synchronization of a named playlist.
-- **Scene covers are static artwork previews.** They can differ from the fully animated scene, and some projects fall back to their author's preview. Higher-resolution video covers use FFmpeg if it is already installed; it is optional.
+- **Scene covers use original artwork or reconstructed HD image layers**, including groups and rotated layers. Complete HD compositions come from the scene itself, so promotional text or collages in Workshop thumbnails do not force a tiny cover. Live 3D scenes and unsupported formats can still fall back to the author's preview; animation, live text, customizations, and shader effects can differ. Video covers use FFmpeg if it is already installed; it is optional.
+- **Settings → Rebuild covers** clears generated covers and refreshes both disk and in-memory cache identities. Updated cover algorithms automatically use a fresh cache generation.
 - **Settings → Preserve playback and mute state** is enabled by default. Leave it on if you want your pause / mute choices to carry across wallpaper changes.
 - If a change fails, check **Logs / Debugger** from the tray menu. Logs include local file paths, so review them before sharing.
 
@@ -104,7 +106,20 @@ These are the settings I tested; other combinations are unverified.
 
 It looks ridiculously good with [TranslucentTB](https://github.com/TranslucentTB/TranslucentTB) and a clean desktop.
 
+For anyone wondering, these are my TranslucentTB settings:
+
+| State | Appearance |
+| --- | --- |
+| Desktop | Clear |
+| Visible window | Clear |
+| Maximised window | Acrylic |
+| Start opened | Clear |
+| Search opened | Disabled |
+| Task view opened | Acrylic |
+
 I use **Ctrl + Space** to toggle desktop icons through Wallpaper Engine. Configure that in Wallpaper Engine's hotkey settings; it is separate from Wallflow's shortcut. TranslucentTB is optional and installed separately.
+
+You may also want to disable any options that let your wallpaper change Windows' accent color or other system colors. I ran into some questionable glitches with those enabled, so I keep them off.
 
 ## Built with
 

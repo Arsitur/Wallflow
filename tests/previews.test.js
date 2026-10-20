@@ -4,6 +4,20 @@ import { createPreviewLoader, createProgressiveCoverLoader } from '../src/lib/pr
 
 const nextTurn = () => new Promise(resolve => setImmediate(resolve));
 
+test('large panorama covers obey a byte budget and evict the least recently used image', async () => {
+  const load = createPreviewLoader(async id => id.repeat(6), 1, 100, 24);
+  await load('a');
+  await load('b');
+  assert.equal(load.peek('a'), 'aaaaaa');
+  await load('c');
+  assert.equal(load.peek('b'), undefined);
+  assert.equal(load.peek('a'), 'aaaaaa');
+  assert.equal(load.peek('c'), 'cccccc');
+  const oversized = createPreviewLoader(async () => 'x'.repeat(20), 1, 100, 24);
+  assert.equal((await oversized('big')).length, 20);
+  assert.equal(oversized.peek('big'), undefined);
+});
+
 test('loads center previews first, limits parallel requests and shares duplicate requests', async () => {
   const started = [];
   const finish = new Map();

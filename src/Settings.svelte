@@ -19,6 +19,9 @@
   let draftPreservePlayback = true;
   let draftSyncPlaylist = true;
   let draftStartWithWindows = false;
+  let draftAmazingAnimations = true;
+  let rebuildingCovers = false;
+  let coverStatus = "";
   let displayMode = "per-monitor";
   const controls = [
     ["Left click a card", "Apply that wallpaper"],
@@ -48,6 +51,7 @@
       draftPreservePlayback = info.preserve_playback;
       draftSyncPlaylist = info.sync_playlist;
       draftStartWithWindows = info.start_with_windows;
+      draftAmazingAnimations = info.amazing_animations ?? true;
       displayMode = info.display_mode;
       loaded = true;
     } catch (error) {
@@ -62,7 +66,7 @@
     catch (error) { settingsError = String(error); }
   }
   async function saveSettings() {
-    if (!loaded || settingsBusy) return;
+    if (!loaded || settingsBusy || rebuildingCovers) return;
     settingsBusy = true;
     settingsError = "";
     try {
@@ -72,6 +76,7 @@
         preservePlayback: draftPreservePlayback,
         syncPlaylist: draftSyncPlaylist,
         startWithWindows: draftStartWithWindows,
+        amazingAnimations: draftAmazingAnimations,
       });
       if (!disposed) await closeSettings();
     } catch (error) {
@@ -80,6 +85,16 @@
     } finally {
       if (!disposed) settingsBusy = false;
     }
+  }
+  async function rebuildCovers() {
+    if (!native || rebuildingCovers || settingsBusy) return;
+    rebuildingCovers = true;
+    coverStatus = "";
+    try {
+      await invoke("rebuild_cover_cache");
+      coverStatus = "Covers will regenerate the next time you open the selector.";
+    } catch (error) { settingsError = String(error); }
+    finally { rebuildingCovers = false; }
   }
   function handleKey(event) {
     if (event.key === "Escape" && !event.defaultPrevented) {
@@ -186,10 +201,19 @@
       <input type="checkbox" bind:checked={draftSyncPlaylist} disabled={settingsBusy} class="mt-1 accent-white" />
       <span>Sync playlist with Wallpaper Engine<span class="mt-1 block text-xs leading-5 text-zinc-400">Applies to the monitor containing this Settings window. “All installed wallpapers” only changes the library view.</span></span>
     </label>
+    <label class="flex items-start gap-3">
+      <input type="checkbox" bind:checked={draftAmazingAnimations} disabled={settingsBusy} class="mt-1 accent-white" />
+      <span>Amazing animations<span class="mt-1 block text-xs leading-5 text-zinc-400">Smoothly pan across each cover as it moves through the carousel: left edge, center, then right edge. Uses the same images and respects Windows reduced-motion preferences.</span></span>
+    </label>
     {#if displayMode === "clone" || displayMode === "stretch"}
       <p class="text-xs leading-5 text-zinc-400">Wallpaper Engine uses {displayMode === "clone" ? "Clone wallpaper" : "Stretch wallpaper"}. Wallpaper and playlist changes apply to all displays. To use separate wallpapers, select “Wallpaper per monitor” in Wallpaper Engine.</p>
     {/if}
     <section aria-labelledby="controls-heading" class="border-t border-white/10 pt-4">
+      <div class="mb-5 flex items-center justify-between gap-4">
+        <div><h3 class="font-medium">Cover cache</h3><p class="mt-1 text-xs leading-5 text-zinc-400">Regenerate covers from the installed wallpaper sources.</p></div>
+        <button type="button" disabled={settingsBusy || rebuildingCovers} class="shrink-0 rounded-lg border border-white/15 px-3 py-2 text-xs disabled:opacity-50" on:click={rebuildCovers}>{rebuildingCovers ? "Rebuilding…" : "Rebuild covers"}</button>
+      </div>
+      {#if coverStatus}<p role="status" class="mb-4 text-xs leading-5 text-zinc-400">{coverStatus}</p>{/if}
       <h3 id="controls-heading" class="mb-3 font-medium">Controls</h3>
       <dl class="grid grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)] gap-x-4 gap-y-3 text-xs leading-5">
         <dt class="text-zinc-200">{draftShortcut || "Global shortcut"}</dt>
@@ -211,7 +235,7 @@
         on:click={closeSettings}>Cancel</button
       ><button
         type="submit"
-        disabled={settingsBusy}
+        disabled={settingsBusy || rebuildingCovers}
         class="cursor-pointer rounded-lg bg-white px-4 py-2 font-medium text-zinc-950 disabled:opacity-50"
         >{settingsBusy ? "Saving…" : "Save"}</button
       >

@@ -4,6 +4,7 @@
 use std::{collections::{HashMap, HashSet}, fs::{self, File}, io::{BufReader, Cursor, Read, Seek, SeekFrom}, path::{Component, Path, PathBuf}};
 use image::{DynamicImage, ImageReader};
 use serde_json::Value;
+mod composition;
 
 const MAX_ASSET: usize = 128 * 1024 * 1024;
 const MAX_PIXELS: u64 = 48 * 1024 * 1024;
@@ -75,7 +76,7 @@ fn local_files(root: &Path) -> Vec<PathBuf> {
 pub fn revision(project: &Path) -> String {
     use std::{collections::hash_map::DefaultHasher, hash::{Hash, Hasher}};
     let mut hash = DefaultHasher::new();
-    "original-scene-v2".hash(&mut hash);
+    "scene-hierarchy-v5".hash(&mut hash);
     if let Some(root) = project.parent() {
         for path in local_files(root) {
             if let Ok(metadata) = path.metadata() {
@@ -96,7 +97,7 @@ impl Assets {
         let scene = project_json["file"].as_str().and_then(safe_name)
             .map(|name| Path::new(&name).with_extension("json").to_string_lossy().into_owned()).unwrap_or_else(|| "scene.json".into());
         let pkg = project_json["file"].as_str().and_then(safe_name)
-            .filter(|name| name.to_lowercase().ends_with(".pkg")).unwrap_or_else(|| "scene.pkg".into());
+            .map(|name| Path::new(&name).with_extension("pkg").to_string_lossy().into_owned()).unwrap_or_else(|| "scene.pkg".into());
         let package = root.join(pkg).canonicalize().ok().filter(|path| path.starts_with(&root))
             .and_then(|path| Package::open(&path));
         let mut names: Vec<_> = local_files(&root).iter().filter_map(|path| path.strip_prefix(&root).ok()
@@ -278,10 +279,126 @@ fn signature(image: &DynamicImage) -> Vec<u8> {
     image.resize_exact(32, 18, image::imageops::FilterType::Triangle).to_rgb8().into_raw()
 }
 
-/// Pick a full-size artwork image. Preview similarity avoids picking a mask or an isolated layer.
+#[cfg(test)]
+fn preview_crop(image: &DynamicImage, reference: &DynamicImage) -> DynamicImage {
+    // Workshop previews are usually square center crops of widescreen artwork.
+    // Stretching both into a signature compared different parts of the scene.
+    let scale = (192.0 / reference.width().max(reference.height()) as f64).min(1.0);
+    image.resize_to_fill((reference.width() as f64*scale).round().max(1.0) as u32, (reference.height() as f64*scale).round().max(1.0) as u32, image::imageops::FilterType::Triangle)
+}
+
+// Raw scene textures are often separate layers, atlases, or untransformed artwork.
+// Only replace the author's composed preview when a source closely matches it.
+fn matching_score(image: &DynamicImage, reference: &DynamicImage) -> Option<f64> {
+    let sample = image.thumbnail(192,192);
+    let thumbnail = sample.to_rgba8();
+    if thumbnail.pixels().any(|pixel| pixel[3] < 250) { return None; }
+    let reference_aspect = reference.width() as f64/reference.height() as f64;
+    let reference = signature(reference);
+    let mut best: Option<f64> = None;
+    let mut compare = |sample: Vec<u8>| {
+        let mean = sample.iter().zip(&reference).map(|(a,b)| (*a as f64-*b as f64).abs()).sum::<f64>() / sample.len() as f64;
+        let correlation = spatial_correlation(&sample, &reference);
+        // Allow lighting, fog and small text overlays only when spatial structure
+        // agrees. A similarly coloured mask/background is not sufficient.
+        if mean <= 30.0 && (correlation >= 0.80 || mean <= 15.0 && correlation >= 0.70 || mean <= 3.0) {
+            let score = mean + (1.0-correlation)*10.0;
+            if best.is_none_or(|current| score < current) { best = Some(score); }
+        }
+    };
+    compare(signature(&sample));
+    let width = sample.width() as f64;
+    let height = sample.height() as f64;
+    let base_width = width.min(height*reference_aspect);
+    let base_height = height.min(width/reference_aspect);
+    // Authors can zoom or offset square previews independently of their scene.
+    // Search only small thumbnails; the returned cover retains the full HD frame.
+    for zoom in [1.0,1.2,1.45,1.75,2.1,2.5] {
+        let (w,h) = ((base_width/zoom).round().max(1.0) as u32,(base_height/zoom).round().max(1.0) as u32);
+        for x in [0.0,0.25,0.5,0.75,1.0] {
+            for y in [0.0,0.25,0.5,0.75,1.0] {
+                let left = ((sample.width()-w) as f64*x).round() as u32;
+                let top = ((sample.height()-h) as f64*y).round() as u32;
+                compare(signature(&sample.crop_imm(left,top,w,h)));
+            }
+        }
+    }
+    best
+}
+
+fn spatial_correlation(a: &[u8], b: &[u8]) -> f64 {
+    let count = (a.len()/3) as f64;
+    let (mut covariance,mut va,mut vb) = (0.0,0.0,0.0);
+    for channel in 0..3 {
+        let ma = a.iter().skip(channel).step_by(3).map(|v| *v as f64).sum::<f64>()/count;
+        let mb = b.iter().skip(channel).step_by(3).map(|v| *v as f64).sum::<f64>()/count;
+        for (a,b) in a.iter().skip(channel).step_by(3).zip(b.iter().skip(channel).step_by(3)) {
+            let (a,b) = (*a as f64-ma,*b as f64-mb);
+            covariance += a*b; va += a*a; vb += b*b;
+        }
+    }
+    if va < count*48.0 || vb < count*48.0 { return 0.0; }
+    covariance/(va*vb).sqrt()
+}
+
+#[cfg(test)]
+fn luminance_correlation(a: &[u8], b: &[u8]) -> f64 {
+    let luma = |rgb: &[u8]| rgb[0] as f64*0.2126+rgb[1] as f64*0.7152+rgb[2] as f64*0.0722;
+    let count = (a.len()/3) as f64;
+    let ma = a.chunks_exact(3).map(luma).sum::<f64>()/count;
+    let mb = b.chunks_exact(3).map(luma).sum::<f64>()/count;
+    let (mut covariance,mut va,mut vb) = (0.0,0.0,0.0);
+    for (a,b) in a.chunks_exact(3).zip(b.chunks_exact(3)) {
+        let (a,b) = (luma(a)-ma,luma(b)-mb);
+        covariance += a*b; va += a*a; vb += b*b;
+    }
+    if va < count*16.0 || vb < count*16.0 { return 0.0; }
+    covariance/(va*vb).sqrt()
+}
+
+fn property(value: &Value) -> &Value { value.get("value").unwrap_or(value) }
+fn vector(value: &Value, default: [f32; 3]) -> [f32; 3] {
+    let Some(text) = property(value).as_str() else { return default; };
+    let values: Vec<f32> = text.split_whitespace().filter_map(|part| part.parse().ok()).collect();
+    let mut result = default;
+    for (i, value) in values.into_iter().take(3).enumerate() { if value.is_finite() { result[i] = value; } }
+    result
+}
+fn layer_texture(assets: &mut Assets, object: &Value) -> Option<String> {
+    let model = assets.json(object["image"].as_str()?)?;
+    let material = assets.json(model["material"].as_str()?)?;
+    let name = material["passes"][0]["textures"][0].as_str()?;
+    Some(format!("materials/{}.tex", name.trim_end_matches(".tex")))
+}
+
+#[cfg(test)]
+fn composed_image(assets: &mut Assets, scene: &Value) -> Option<DynamicImage> {
+    composition::render(assets,scene).map(|composition| composition.image)
+}
+
+/// Return a verified higher-resolution equivalent, otherwise use the author's preview.
 pub fn scene_image(project: &Path, preview: Option<&Path>) -> Option<DynamicImage> {
+    let mut data = Vec::new();
+    File::open(preview?).ok()?.take(20 * 1024 * 1024).read_to_end(&mut data).ok()?;
+    let reference = decode_image(&data)?;
     let mut assets = Assets::open(project)?;
     let scene = assets.json(&assets.scene.clone());
+    let mut best: Option<(f64, DynamicImage)> = None;
+    let mut scene_composition = None;
+    if let Some(composition) = scene.as_ref().and_then(|scene| composition::render(&mut assets, scene)) {
+        let composed = composition.image;
+        let reference_colour = signature(&reference).chunks_exact(3).map(|rgb| (rgb[0] as f32-rgb[1] as f32).abs()+(rgb[1] as f32-rgb[2] as f32).abs()).sum::<f32>()/576.0;
+        let variants = if reference_colour < 3.0 { vec![DynamicImage::ImageRgb8(composed.grayscale().to_rgb8())] } else { vec![composed] };
+        for image in variants {
+            // The scene's own resolved HD image layers are authoritative. The
+            // Workshop thumbnail can be a collage, contain promotional text,
+            // or use different filters and should not veto a complete scene.
+            if composition.reliable { scene_composition = Some(image.clone()); }
+            if let Some(score) = matching_score(&image, &reference) {
+                if best.as_ref().is_none_or(|(current,_)| score < *current) { best = Some((score,image)); }
+            }
+        }
+    }
     let mut referenced = HashSet::new();
     if let Some(objects) = scene.as_ref().and_then(|scene| scene["objects"].as_array()) {
         for object in objects.iter().take(2048) {
@@ -313,28 +430,96 @@ pub fn scene_image(project: &Path, preview: Option<&Path>) -> Option<DynamicImag
         candidates.push((rank, name, texture));
     }
     candidates.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-    let reference = preview.and_then(|path| File::open(path).ok()).and_then(|file| {
-        let mut data = Vec::new(); file.take(20 * 1024 * 1024).read_to_end(&mut data).ok()?;
-        decode_image(&data).map(|image| signature(&image))
-    });
-    let mut best: Option<(f64, DynamicImage)> = None;
     for (_, name, texture) in candidates.into_iter().take(8) {
         let Some(bytes) = assets.read(&name, MAX_ASSET, false) else { continue; };
         let decoded = if texture { texture_image(&bytes) } else { decode_image(&bytes) };
         let Some(image) = decoded else { continue; };
-        let similarity = reference.as_ref().map(|reference| {
-            signature(&image).iter().zip(reference).map(|(a,b)| (*a as f64 - *b as f64).abs()).sum::<f64>() / reference.len() as f64
-        }).unwrap_or(0.0);
+        let Some(similarity) = matching_score(&image, &reference) else { continue; };
         // Equal-looking originals beat tiny source images; comparison uses the entire image, before portrait cropping.
         let score = similarity - (u64::from(image.width()) * u64::from(image.height())).min(16_000_000) as f64 / 16_000_000.0;
         if best.as_ref().is_none_or(|(best_score, _)| score < *best_score) { best = Some((score, image)); }
     }
-    best.map(|(_, image)| image)
+    best.map(|(_, image)| image).or(scene_composition)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[ignore = "read-only audit of the selected installed playlist; optional image output"]
+    fn audit_installed_playlist_covers() {
+        let executable = Path::new(r"C:\Program Files (x86)\Steam\steamapps\common\wallpaper_engine\wallpaper64.exe");
+        let config = crate::engine_config::EngineConfig::read(executable).unwrap();
+        let name = std::env::var("WALLFLOW_AUDIT_PLAYLIST").unwrap_or_else(|_| "Showcase".into());
+        let playlist = config.playlists.iter().find(|p| p.name==name).unwrap();
+        let output = std::env::var_os("WALLFLOW_COVER_DIAGNOSTICS").map(PathBuf::from);
+        if let Some(output) = &output { fs::create_dir_all(output).unwrap(); }
+        for file in &playlist.items {
+            let Some(root) = Path::new(file).parent() else { continue; };
+            let project = root.join("project.json");
+            let Ok(bytes) = fs::read(&project) else { continue; };
+            let metadata: Value = serde_json::from_slice(&bytes).unwrap();
+            if !metadata["type"].as_str().is_some_and(|kind| kind.eq_ignore_ascii_case("scene")) { continue; }
+            let id = root.file_name().unwrap().to_string_lossy();
+            let reference = decode_image(&fs::read(root.join(metadata["preview"].as_str().unwrap())).unwrap()).unwrap();
+            let result = scene_image(&project,Some(&root.join(metadata["preview"].as_str().unwrap())));
+            eprintln!("AUDIT {id} preview {}x{} -> {:?}",reference.width(),reference.height(),result.as_ref().map(|image| (image.width(),image.height())));
+            if let Some(output) = &output { reference.to_rgb8().save(output.join(format!("{id}-preview.jpg"))).unwrap(); }
+            if let Some(image) = result { if let Some(output) = &output { image.thumbnail(960,540).to_rgb8().save(output.join(format!("{id}-result.jpg"))).unwrap(); } continue; }
+            let mut assets = Assets::open(&project).unwrap();
+            if let Some(output) = &output {
+                if let Some(scene) = assets.json(&assets.scene.clone()) {
+                    if let Some(image) = composed_image(&mut assets,&scene) { image.thumbnail(960,540).save(output.join(format!("{id}-composed.png"))).unwrap(); }
+                }
+            }
+            let mut names = Vec::new();
+            for name in assets.names.clone().into_iter().filter(|name| name.ends_with(".tex")) {
+                let Some(header) = assets.read(&name,8192,true) else { continue; };
+                if let Some((w,h)) = dimensions(&header,true) { names.push((w as u64*h as u64,name)); }
+            }
+            names.sort_by(|a,b| b.0.cmp(&a.0));
+            for (i,(_,name)) in names.into_iter().take(5).enumerate() {
+                let image = assets.read(&name,MAX_ASSET,false).and_then(|bytes| texture_image(&bytes));
+                eprintln!("  {id} {i} {name} decoded={:?} match={:?}",image.as_ref().map(|im| (im.width(),im.height())),image.as_ref().and_then(|im| matching_score(im,&reference)));
+                if let (Some(output),Some(image)) = (&output,image) { image.thumbnail(720,480).save(output.join(format!("{id}-candidate-{i}.png"))).unwrap(); }
+            }
+        }
+    }
+    #[test]
+    #[ignore = "manual read-only scene quality diagnostics; optional output directory"]
+    fn scene_quality_diagnostics() {
+        let output = std::env::var_os("WALLFLOW_COVER_DIAGNOSTICS").map(PathBuf::from);
+        for id in ["3653567054", "2984126406", "3792108790", "1888322953"] {
+            let root = Path::new(r"C:\Program Files (x86)\Steam\steamapps\workshop\content\431960").join(id);
+            let metadata: Value = serde_json::from_slice(&fs::read(root.join("project.json")).unwrap()).unwrap();
+            let reference = decode_image(&fs::read(root.join(metadata["preview"].as_str().unwrap())).unwrap()).unwrap();
+            eprintln!("{id} preview {}x{}", reference.width(), reference.height());
+            if let Some(output) = &output { fs::create_dir_all(output).unwrap(); reference.to_rgb8().save(output.join(format!("{id}-preview.jpg"))).unwrap(); }
+            let mut assets = Assets::open(&root.join("project.json")).unwrap();
+            let scene = assets.json(&assets.scene.clone()).unwrap();
+            if let Some(composed) = composed_image(&mut assets, &scene) {
+                for (kind,image) in [("composed",composed.clone()),("gray",DynamicImage::ImageRgb8(composed.grayscale().to_rgb8()))] {
+                    let mean = signature(&preview_crop(&image,&reference)).iter().zip(signature(&reference)).map(|(a,b)| (*a as f64-b as f64).abs()).sum::<f64>()/1728.0;
+                    let correlation = luminance_correlation(&signature(&preview_crop(&image,&reference)),&signature(&reference));
+                    eprintln!("{id} {kind} score {:?}, mean {mean:.1}, correlation {correlation:.2}",matching_score(&image,&reference));
+                    if let Some(output) = &output { image.thumbnail(960,540).to_rgb8().save(output.join(format!("{id}-{kind}.jpg"))).unwrap(); }
+                }
+            }
+            let mut candidates = Vec::new();
+            for name in assets.names.clone().into_iter().filter(|name| name.ends_with(".tex")) {
+                let Some(header) = assets.read(&name, 8192, true) else { continue; };
+                let Some((w,h)) = dimensions(&header,true) else { continue; };
+                candidates.push((w as u64*h as u64,name));
+            }
+            candidates.sort_by(|a,b| b.0.cmp(&a.0));
+            for (index,(_,name)) in candidates.into_iter().take(4).enumerate() {
+                let Some(image) = assets.read(&name,MAX_ASSET,false).and_then(|bytes| texture_image(&bytes)) else { continue; };
+                let error = |image: &DynamicImage| signature(&preview_crop(image,&reference)).iter().zip(signature(&reference)).map(|(a,b)| (*a as f64-b as f64).abs()).sum::<f64>()/1728.0;
+                eprintln!("{id} {name} {}x{} error {:.1} flipped {:.1} rotated {:.1}",image.width(),image.height(),error(&image),error(&image.flipv()),error(&image.rotate180()));
+                if let Some(output) = &output { image.thumbnail(960,540).to_rgb8().save(output.join(format!("{id}-{index}.jpg"))).unwrap(); }
+            }
+        }
+    }
     struct Fixture(PathBuf);
     impl Fixture {
         fn new() -> Self {
@@ -421,23 +606,123 @@ mod tests {
         fs::write(fixture.0.join("custom.json"), r#"{"objects":[]}"#).unwrap();
         let original = fixture.0.join("art.png");
         image::RgbImage::from_pixel(900,600,image::Rgb([40,70,90])).save(&original).unwrap();
+        let preview = fixture.0.join("preview.png");
+        image::RgbImage::from_pixel(90,60,image::Rgb([40,70,90])).save(&preview).unwrap();
         let before = revision(&project);
-        let image = scene_image(&project, None).unwrap();
+        let image = scene_image(&project, Some(&preview)).unwrap();
         assert_eq!((image.width(), image.height()), (900,600));
         image::RgbImage::from_pixel(901,601,image::Rgb([90,70,40])).save(&original).unwrap();
         assert_ne!(revision(&project), before);
     }
     #[test]
+    fn unrelated_layers_and_unverified_artwork_fall_back_to_author_preview() {
+        let fixture = Fixture::new();
+        let project = fixture.0.join("project.json");
+        fs::write(&project, r#"{"file":"scene.json","type":"scene"}"#).unwrap();
+        let preview = fixture.0.join("preview.png");
+        image::RgbImage::from_pixel(90,60,image::Rgb([40,70,90])).save(&preview).unwrap();
+        image::RgbImage::from_pixel(900,600,image::Rgb([190,10,10])).save(fixture.0.join("layer.png")).unwrap();
+        assert!(scene_image(&project, Some(&preview)).is_none());
+        assert!(scene_image(&project, None).is_none());
+        let transparent = DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(900,600,image::Rgba([40,70,90,100])));
+        transparent.save(fixture.0.join("layer.png")).unwrap();
+        assert!(scene_image(&project, Some(&preview)).is_none());
+    }
+    #[test]
+    fn matching_requires_the_same_composition_not_only_similar_average_colours() {
+        let art = image::RgbImage::from_fn(900,600,|x,y| image::Rgb([(x * 255 / 900) as u8, (y * 255 / 600) as u8, 100]));
+        let art = DynamicImage::ImageRgb8(art);
+        let preview = art.thumbnail(90,60);
+        assert!(matching_score(&art, &preview).is_some());
+        assert!(matching_score(&art.fliph(), &preview).is_none());
+        assert!(matching_score(&art.rotate180(), &preview).is_none());
+    }
+    #[test]
+    fn square_zoomed_previews_can_identify_their_original_panorama() {
+        let art = DynamicImage::ImageRgb8(image::RgbImage::from_fn(900,600,|x,y| image::Rgb([(x*255/900) as u8,(y*255/600) as u8,((x/9+y/6)%256) as u8])));
+        let preview = art.crop_imm(225,75,450,450).thumbnail(90,90);
+        assert!(matching_score(&art,&preview).is_some());
+    }
+    #[test]
+    fn static_scene_composition_honours_visibility_position_colour_and_alpha() {
+        let fixture = Fixture::new();
+        let project = fixture.0.join("project.json");
+        fs::write(&project,r#"{"file":"custom.json"}"#).unwrap();
+        fs::create_dir(fixture.0.join("models")).unwrap();
+        fs::create_dir(fixture.0.join("materials")).unwrap();
+        fs::write(fixture.0.join("models/layer.json"),r#"{"material":"materials/layer.json"}"#).unwrap();
+        fs::write(fixture.0.join("materials/layer.json"),r#"{"passes":[{"textures":["layer"]}]}"#).unwrap();
+        fs::write(fixture.0.join("materials/layer.tex"),texture(4,4,4,4,0,&[255,0,0,255].repeat(16))).unwrap();
+        let scene = serde_json::json!({"general":{"orthogonalprojection":{"width":200,"height":100},"clearcolor":"0 0 1"},"objects":[
+            {"image":"models/layer.json","origin":"50 50 0","size":"100 100","alpha":{"value":0.5}},
+            {"image":"models/layer.json","origin":"150 50 0","size":"100 100","visible":{"value":false}}
+        ]});
+        let mut assets = Assets::open(&project).unwrap();
+        let composed = composed_image(&mut assets,&scene).unwrap().to_rgb8();
+        assert_eq!(composed.dimensions(),(200,100));
+        let left = composed.get_pixel(50,50);
+        assert!((left[0] as i32-128).abs()<=1 && (left[2] as i32-127).abs()<=1);
+        assert_eq!(composed.get_pixel(150,50).0,[0,0,255]);
+    }
+    #[test]
+    #[ignore = "requires the installed Workshop library"]
+    fn installed_square_previews_resolve_to_hd_artwork() {
+        let root = Path::new(r"C:\Program Files (x86)\Steam\steamapps\workshop\content\431960");
+        for id in ["2984126406","3792108790","1888322953"] {
+            let project = root.join(id).join("project.json");
+            let metadata: Value = serde_json::from_slice(&fs::read(&project).unwrap()).unwrap();
+            let preview = root.join(id).join(metadata["preview"].as_str().unwrap());
+            let image = scene_image(&project,Some(&preview)).expect(id);
+            assert!(image.width()>=1900 && image.height()>=1080,"{id}: {}x{}",image.width(),image.height());
+        }
+    }
+    #[test]
+    #[ignore = "requires the reported local Workshop scene"]
+    fn reported_layered_scene_has_a_verified_high_resolution_composition() {
+        let root = Path::new(r"C:\Program Files (x86)\Steam\steamapps\workshop\content\431960\3653567054");
+        assert!(root.join("preview.gif").is_file());
+        let image = scene_image(&root.join("project.json"), Some(&root.join("preview.gif"))).expect("Reconstruct the scene instead of enlarging its 192px preview");
+        assert!(image.width() >= 1920 && image.height() >= 1080);
+        if let Some(output) = std::env::var_os("WALLFLOW_COVER_DIAGNOSTICS") {
+            let output = PathBuf::from(output); fs::create_dir_all(&output).unwrap();
+            image.to_rgb8().save(output.join("3653567054-hd.jpg")).unwrap();
+        }
+    }
+    #[test]
+    #[ignore = "requires the user's newly reported installed scene"]
+    fn grouped_empress_scene_uses_hd_instead_of_its_160px_gif() {
+        let root=Path::new(r"C:\Program Files (x86)\Steam\steamapps\workshop\content\431960\3810943704");
+        let image=scene_image(&root.join("project.json"),Some(&root.join("preview.gif"))).expect("The character is a child of a transform group");
+        assert!(image.width()>=1920 && image.height()>=1080);
+        if let Some(output)=std::env::var_os("WALLFLOW_COVER_DIAGNOSTICS") {
+            let output=PathBuf::from(output);fs::create_dir_all(&output).unwrap();
+            image.thumbnail(1280,720).to_rgb8().save(output.join("3810943704-result.jpg")).unwrap();
+        }
+    }
+    #[test]
     #[ignore = "requires the local Wallpaper Engine library"]
-    fn installed_scene_artwork_has_original_resolution() {
+    fn installed_scene_textures_decode_at_original_resolution() {
         let root = Path::new(r"C:\Program Files (x86)\Steam\steamapps\workshop\content\431960");
         for id in ["2984126406", "3792108790", "1888322953"] {
             let project = root.join(id).join("project.json");
-            let image = scene_image(&project, Some(&root.join(id).join("preview.jpg"))).expect(id);
-            assert!(image.width() >= 1900 && image.height() >= 1080, "{id}: {}x{}", image.width(), image.height());
+            let mut assets = Assets::open(&project).unwrap();
+            let mut found = false;
+            for name in assets.names.clone().into_iter().filter(|name| name.ends_with(".tex")) {
+                let Some(header) = assets.read(&name, 8192, true) else { continue; };
+                let Some((width, height)) = dimensions(&header, true) else { continue; };
+                if width < 1900 || height < 1080 { continue; }
+                let Some(bytes) = assets.read(&name, MAX_ASSET, false) else { continue; };
+                let Some(image) = texture_image(&bytes) else { continue; };
+                if image.width() >= 1900 && image.height() >= 1080 { found = true; break; }
+            }
+            assert!(found, "{id}: original textures must remain decodable even when they are unsuitable as covers");
         }
         let animated = root.join("3400828344");
-        let image = scene_image(&animated.join("project.json"), Some(&animated.join("preview.gif"))).unwrap();
-        assert_eq!((image.width(), image.height()), (426,233));
+        let mut assets = Assets::open(&animated.join("project.json")).unwrap();
+        let found = assets.names.clone().into_iter().filter(|name| [".tex", ".png", ".jpg", ".jpeg", ".webp"].iter().any(|ext| name.ends_with(ext))).any(|name| {
+            assets.read(&name, MAX_ASSET, false).and_then(|bytes| if name.ends_with(".tex") { texture_image(&bytes) } else { decode_image(&bytes) })
+                .is_some_and(|image| (image.width(), image.height()) == (426,233))
+        });
+        assert!(found, "Animated textures must decode a single frame rather than the atlas");
     }
 }

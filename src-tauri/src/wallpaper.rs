@@ -30,6 +30,7 @@ pub struct Gallery {
     records: Mutex<HashMap<String, WallpaperRecord>>,
     engine: Mutex<Option<PathBuf>>,
     playlist: Mutex<Option<String>>,
+    unavailable: Mutex<HashMap<String, &'static str>>,
     operation: Mutex<()>,
     quitting: AtomicBool,
 }
@@ -107,8 +108,17 @@ fn imported_image(file: &str) -> Option<WallpaperRecord> {
     Some(WallpaperRecord { public: item, target: target.clone(), preview: Some(target), project: None })
 }
 
-fn reconcile_playlist_records(records: &mut HashMap<String, WallpaperRecord>, files: impl IntoIterator<Item = String>) {
+fn playlist_item_problem(file: &str) -> &'static str {
+    let path = Path::new(file);
+    if path.parent().is_some_and(|folder| !folder.is_dir()) { "Wallpaper folder is missing from disk" }
+    else if !path.is_file() { "Playlist target file is missing from disk" }
+    else if path.parent().is_some_and(|folder| !folder.join("project.json").is_file()) { "No project.json found; this is not a supported standalone image" }
+    else { "Wallpaper project metadata or media is invalid or unsupported" }
+}
+
+fn reconcile_playlist_records(records: &mut HashMap<String, WallpaperRecord>, unavailable: &mut HashMap<String, &'static str>, files: impl IntoIterator<Item = String>) {
     let mut seen = std::collections::HashSet::new();
+    let mut current_unavailable = HashMap::new();
     for file in files {
         if !seen.insert(normalize_path(&file)) { continue; }
         if records.values().any(|record| matches_file(record, &file)) { continue; }
@@ -121,9 +131,15 @@ fn reconcile_playlist_records(records: &mut HashMap<String, WallpaperRecord>, fi
             crate::diagnostics::record("info", "scan", format!("Discovered playlist item {} without a full rescan", record.public.id));
             records.insert(record.public.id.clone(), record);
         } else {
-            crate::diagnostics::record("warn", "scan", format!("Playlist item is unavailable or unsupported: {file}"));
+            let reason = playlist_item_problem(&file);
+            let key = normalize_path(&file);
+            if unavailable.get(&key) != Some(&reason) {
+                crate::diagnostics::record("warn", "scan", format!("{reason}: {file}. The saved playlist still references this item."));
+            }
+            current_unavailable.insert(key, reason);
         }
     }
+    *unavailable = current_unavailable;
 }
 
 fn filter_records(records: &HashMap<String, WallpaperRecord>, files: Option<&[String]>) -> Vec<WallpaperItem> {
@@ -173,6 +189,7 @@ fn active_record(records: &HashMap<String, WallpaperRecord>, live: Option<&str>,
 pub struct GallerySnapshot {
     items: Vec<WallpaperItem>, active_id: Option<String>, playlist: Option<String>, monitor: u32,
     display_mode: &'static str,
+    amazing_animations: bool,
 }
 
 #[tauri::command]
@@ -200,12 +217,15 @@ pub async fn gallery_snapshot(app: tauri::AppHandle) -> Result<GallerySnapshot, 
         let current = EngineConfig::read(&executable).ok().and_then(|latest| latest.current.get(&monitor).cloned())
             .or_else(|| config.current.get(&monitor).cloned());
         let mut records = gallery.records.lock().map_err(|e| e.to_string())?;
-        reconcile_playlist_records(&mut records, config.playlists.iter().chain(config.monitor_playlists.values()).flat_map(|playlist| playlist.items.iter().cloned()));
-        let items = filter_records(&records, selected.as_ref().map(|playlist| playlist.items.as_slice()));
+        let mut unavailable = gallery.unavailable.lock().map_err(|e| e.to_string())?;
+        reconcile_playlist_records(&mut records, &mut unavailable, config.playlists.iter().chain(config.monitor_playlists.values()).flat_map(|playlist| playlist.items.iter().cloned()));
+        let mut items = filter_records(&records, selected.as_ref().map(|playlist| playlist.items.as_slice()));
+        let cache_generation = app.path().app_cache_dir().ok().map(|dir| crate::cover_cache::generation(&dir.join("previews"))).unwrap_or_default();
+        for item in &mut items { item.preview_revision.push_str(&format!(":{cache_generation}")); }
         let active_id = active_record(&records, live.as_deref(), current.as_deref())
             .filter(|id| items.iter().any(|item| &item.id == id));
         crate::diagnostics::record("info", "snapshot", format!("Display {monitor_name} (Monitor{physical}) -> renderer Monitor{monitor}; mode={display_mode}; playlist={playlist:?}; {} items; active={active_id:?}; live query={}", items.len(), live.is_some()));
-        Ok(GallerySnapshot { items, active_id, playlist, monitor, display_mode })
+        Ok(GallerySnapshot { items, active_id, playlist, monitor, display_mode, amazing_animations: crate::settings::amazing_animations(&app) })
     }).await.map_err(|e| e.to_string())?
 }
 
@@ -374,7 +394,7 @@ fn image_preview(path: &Path, cache_dir: Option<PathBuf>, detailed: bool) -> Res
     meta.len().hash(&mut hash);
     meta.modified().ok().hash(&mut hash);
     // Version the key when thumbnail settings change.
-    ("portrait-cover-v3", detailed).hash(&mut hash);
+    ("panorama-cover-v4", detailed).hash(&mut hash);
     let cache_path = cache_dir.map(|dir| dir.join(format!("{:016x}.jpg", hash.finish())));
     if let Some(bytes) = cache_path.as_ref().and_then(|file| fs::read(file).ok()) {
         return Ok(Some(format!("data:image/jpeg;base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes))));
@@ -393,13 +413,13 @@ fn image_preview(path: &Path, cache_dir: Option<PathBuf>, detailed: bool) -> Res
 }
 
 fn portrait_bytes(decoded: DynamicImage, detailed: bool) -> Result<Vec<u8>, String> {
-    // Crop BEFORE reducing, from the original artwork rather than an enlarged thumbnail.
-    let (width, height, quality) = if detailed { (560, 1240, 92) } else { (224, 496, 78) };
-    let (source_width, source_height) = (decoded.width(), decoded.height());
-    let crop_width = source_width.min((u64::from(source_height) * u64::from(width) / u64::from(height)).max(1) as u32);
-    let crop_height = source_height.min((u64::from(source_width) * u64::from(height) / u64::from(width)).max(1) as u32);
-    let crop = decoded.crop_imm((source_width - crop_width) / 2, (source_height - crop_height) / 2, crop_width, crop_height);
-    let thumb = DynamicImage::ImageRgb8(crop.resize_exact(width, height, image::imageops::FilterType::Lanczos3).to_rgb8());
+    // Retain the entire artwork so the card can pan left/center/right without
+    // another decode. Never enlarge a tiny Workshop preview and call it HD.
+    let (width, height, quality) = if detailed { (2560, 1440, 96) } else { (280, 224, 82) };
+    let scaled = if decoded.width() > width || decoded.height() > height {
+        decoded.resize(width, height, image::imageops::FilterType::Lanczos3)
+    } else { decoded };
+    let thumb = DynamicImage::ImageRgb8(scaled.to_rgb8());
     let mut bytes = Vec::new();
     JpegEncoder::new_with_quality(&mut bytes, quality)
         .encode_image(&thumb).map_err(|e| e.to_string())?;
@@ -413,10 +433,11 @@ fn jpeg_data(bytes: &[u8]) -> String {
 fn original_scene_cover(record: &WallpaperRecord, cache_dir: &Path) -> Option<String> {
     let revision = crate::covers::revision(&record.target);
     let mut hash = DefaultHasher::new();
-    ("source-portrait-v1", path_key(&record.target), revision).hash(&mut hash);
+    ("source-panorama-v4", path_key(&record.target), revision).hash(&mut hash);
     let cache = cache_dir.join(format!("source-{:016x}.jpg", hash.finish()));
     if let Ok(bytes) = fs::read(&cache) { return Some(jpeg_data(&bytes)); }
     let image = crate::covers::scene_image(&record.target, record.preview.as_deref())?;
+    crate::diagnostics::record("debug", "preview", format!("{}: generated scene cover from source layers, {}x{}", record.public.id, image.width(), image.height()));
     let bytes = portrait_bytes(image, true).ok()?;
     if fs::create_dir_all(cache_dir).is_ok() { let _ = fs::write(cache, &bytes); }
     Some(jpeg_data(&bytes))
@@ -427,7 +448,7 @@ fn video_poster(path: &Path, cache_dir: &Path) -> Option<String> {
     static NEXT_POSTER: AtomicU64 = AtomicU64::new(0);
     let metadata = fs::metadata(path).ok()?;
     let mut hash = DefaultHasher::new();
-    ("video-poster-v1", path_key(path), metadata.len(), metadata.modified().ok()).hash(&mut hash);
+    ("video-panorama-v2", path_key(path), metadata.len(), metadata.modified().ok()).hash(&mut hash);
     let key = hash.finish();
     let cache = cache_dir.join(format!("video-{key:016x}.jpg"));
     if let Ok(bytes) = fs::read(&cache) {
@@ -439,7 +460,7 @@ fn video_poster(path: &Path, cache_dir: &Path) -> Option<String> {
     fs::create_dir_all(cache_dir).ok()?;
     let temporary = cache_dir.join(format!("video-{key:016x}-{}-{}.jpg", std::process::id(), NEXT_POSTER.fetch_add(1, Ordering::Relaxed)));
     let mut child = engine_command(&ffmpeg).args(["-nostdin", "-hide_banner", "-loglevel", "error", "-protocol_whitelist", "file,pipe", "-ss", "1", "-i"])
-        .arg(path).args(["-frames:v", "1", "-vf", "scale=560:1240:force_original_aspect_ratio=increase,crop=560:1240", "-q:v", "2", "-y"])
+        .arg(path).args(["-frames:v", "1", "-vf", "scale=w='min(2560,iw)':h='min(1440,ih)':force_original_aspect_ratio=decrease", "-q:v", "1", "-y"])
         .arg(&temporary).spawn().ok()?;
     let start = std::time::Instant::now();
     let success = loop {
@@ -457,22 +478,38 @@ fn video_poster(path: &Path, cache_dir: &Path) -> Option<String> {
 }
 
 #[tauri::command]
+pub async fn rebuild_cover_cache(app: tauri::AppHandle, window: tauri::WebviewWindow) -> Result<(),String> {
+    if window.label()!="settings" { return Err("Cover rebuilding is only available in Settings.".into()); }
+    tauri::async_runtime::spawn_blocking(move || {
+        let root=app.path().app_cache_dir().map_err(|e| e.to_string())?.join("previews");
+        crate::cover_cache::rebuild(&root)?;
+        crate::diagnostics::record("info","preview","Cover cache rebuilt. Visible covers will regenerate on the next selector opening.");
+        Ok(())
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 pub async fn wallpaper_preview(id: String, quality: Option<String>, state: State<'_, Gallery>, app: tauri::AppHandle) -> Result<Option<String>, String> {
     let record = state.records.lock().map_err(|e| e.to_string())?.get(&id).cloned();
     let Some(record) = record else { return Ok(None); };
-    let cache_dir = app.path().app_cache_dir().ok().map(|dir| dir.join("previews"));
+    let cache_dir = app.path().app_cache_dir().ok().map(|dir| crate::cover_cache::directory(&dir.join("previews")));
     let preview_id = id.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         let detailed = quality.as_deref() == Some("high");
         if detailed && record.public.kind == "scene" {
             if let Some(data) = cache_dir.as_deref().and_then(|dir| original_scene_cover(&record, dir)) { return Ok(Some(data)); }
-            crate::diagnostics::record("debug", "preview", format!("{}: scene artwork unavailable; using author preview", record.public.id));
+            crate::diagnostics::record("debug", "preview", format!("{}: no source artwork matching the composed preview; using author preview", record.public.id));
         }
         if detailed && record.public.kind == "video" {
             if let Some(data) = cache_dir.as_deref().and_then(|dir| video_poster(&record.target, dir)) { return Ok(Some(data)); }
             crate::diagnostics::record("debug", "preview", format!("{}: video frame unavailable; using author preview", record.public.id));
         }
         let Some(path) = record.preview else { return Ok(None); };
+        if detailed {
+            if let Some((width,height)) = ImageReader::open(&path).ok().and_then(|reader| reader.with_guessed_format().ok()).and_then(|reader| reader.into_dimensions().ok()) {
+                crate::diagnostics::record("debug","preview",format!("{}: author preview fallback, {width}x{height}",record.public.id));
+            }
+        }
         if detailed { image_preview(&path, cache_dir, true) } else { preview_data(&path, cache_dir) }
     }).await.map_err(|e| e.to_string())?;
     if let Err(error) = &result { crate::diagnostics::record("warn", "preview", format!("{preview_id}: {error}")); }
@@ -712,10 +749,31 @@ mod tests {
             "title":"New video", "type":"Video", "file":filename, "workshopid":"99999"
         })).unwrap()).unwrap();
         let file = folder.join(filename).to_string_lossy().into_owned();
-        reconcile_playlist_records(&mut records, vec![file.clone(), file.clone()]);
+        reconcile_playlist_records(&mut records, &mut HashMap::new(), vec![file.clone(), file.clone()]);
         assert_eq!(records.len(), 1);
         assert_eq!(records["workshop:12345"].public.kind, "video");
         assert_eq!(filter_records(&records, Some(&[file]))[0].id, "workshop:12345");
+    }
+    #[test]
+    fn missing_playlist_items_report_the_reason_and_recover_after_installation() {
+        let fixture = Fixture::new();
+        let folder = fixture.0.join("missing");
+        let file = folder.join("scene.pkg").to_string_lossy().into_owned();
+        let mut records = HashMap::new();
+        let mut unavailable = HashMap::new();
+        reconcile_playlist_records(&mut records, &mut unavailable, vec![file.clone(), file.clone()]);
+        assert_eq!(unavailable.len(), 1);
+        assert_eq!(unavailable[&normalize_path(&file)], "Wallpaper folder is missing from disk");
+        fs::create_dir(&folder).unwrap();
+        reconcile_playlist_records(&mut records, &mut unavailable, vec![file.clone()]);
+        assert_eq!(unavailable[&normalize_path(&file)], "Playlist target file is missing from disk");
+        fs::write(&file, b"scene").unwrap();
+        reconcile_playlist_records(&mut records, &mut unavailable, vec![file.clone()]);
+        assert_eq!(unavailable[&normalize_path(&file)], "No project.json found; this is not a supported standalone image");
+        fs::write(folder.join("project.json"), r#"{"type":"scene","file":"scene.pkg","title":"Installed"}"#).unwrap();
+        reconcile_playlist_records(&mut records, &mut unavailable, vec![file]);
+        assert_eq!(records.len(), 1);
+        assert!(unavailable.is_empty());
     }
     #[test]
     fn unicode_video_uses_metadata_for_the_command_but_keeps_its_media_settings_identity() {
@@ -744,7 +802,7 @@ mod tests {
     fn installed_playlist_item_is_discovered_without_a_rescan() {
         let file = std::env::var("WALLFLOW_PLAYLIST_TEST_FILE").expect("WALLFLOW_PLAYLIST_TEST_FILE is required");
         let mut records = HashMap::new();
-        reconcile_playlist_records(&mut records, vec![file.clone()]);
+        reconcile_playlist_records(&mut records, &mut HashMap::new(), vec![file.clone()]);
         assert_eq!(records.len(), 1, "Installed playlist file must be discoverable");
         let record = records.values().next().unwrap();
         assert!(matches_file(record, &file));
@@ -856,16 +914,19 @@ mod tests {
         assert_eq!(fs::read_dir(&cache).unwrap().count(), 2);
     }
     #[test]
-    fn detailed_portrait_cache_preserves_display_resolution_instead_of_landscape_thumbnail_size() {
+    fn detailed_covers_retain_full_resolution_and_both_edges_for_panning() {
         let fixture = Fixture::new();
         let source = fixture.0.join("wide.png");
         let cache = fixture.0.join("cache");
-        image::RgbImage::from_pixel(1920, 1080, image::Rgb([70, 110, 160])).save(&source).unwrap();
+        image::RgbImage::from_fn(1920, 1080, |x,_| if x < 640 { image::Rgb([240,10,10]) } else if x > 1280 { image::Rgb([10,10,240]) } else { image::Rgb([70,110,160]) }).save(&source).unwrap();
         let quick = image_preview(&source, Some(cache.clone()), false).unwrap().unwrap();
         let high = image_preview(&source, Some(cache.clone()), true).unwrap().unwrap();
         let decode = |data: &str| image::load_from_memory(&base64::engine::general_purpose::STANDARD.decode(data.split_once(',').unwrap().1).unwrap()).unwrap();
-        assert_eq!((decode(&quick).width(), decode(&quick).height()), (224, 496));
-        assert_eq!((decode(&high).width(), decode(&high).height()), (560, 1240));
+        assert_eq!((decode(&quick).width(), decode(&quick).height()), (280, 158));
+        let panorama = decode(&high).to_rgb8();
+        assert_eq!(panorama.dimensions(), (1920,1080));
+        assert!(panorama.get_pixel(10,540)[0] > 230);
+        assert!(panorama.get_pixel(1910,540)[2] > 230);
         assert_eq!(image_preview(&source, Some(cache.clone()), true).unwrap().unwrap(), high);
         assert_eq!(fs::read_dir(cache).unwrap().count(), 2);
     }
@@ -875,17 +936,18 @@ mod tests {
         let folder = fixture.project("original", r#", "preview":"preview.jpg""#);
         let original = folder.join("artwork.png");
         image::RgbImage::from_pixel(900,600,image::Rgb([10,80,190])).save(&original).unwrap();
-        image::RgbImage::from_pixel(20,20,image::Rgb([190,10,10])).save(folder.join("preview.jpg")).unwrap();
+        image::RgbImage::from_pixel(90,60,image::Rgb([10,80,190])).save(folder.join("preview.jpg")).unwrap();
         let record = project(&folder, "local").unwrap();
         let cache = fixture.0.join("cache");
         let first = original_scene_cover(&record, &cache).unwrap();
         let bytes = base64::engine::general_purpose::STANDARD.decode(first.split_once(',').unwrap().1).unwrap();
         let cover = image::load_from_memory(&bytes).unwrap().to_rgb8();
-        assert_eq!(cover.dimensions(), (560,1240));
-        assert!(cover.get_pixel(280,620).0[0] < 30 && cover.get_pixel(280,620).0[2] > 150);
+        assert_eq!(cover.dimensions(), (900,600));
+        assert!(cover.get_pixel(450,300).0[0] < 30 && cover.get_pixel(450,300).0[2] > 150);
         assert_eq!(original_scene_cover(&record, &cache).unwrap(), first);
         assert_eq!(fs::read_dir(&cache).unwrap().count(), 1);
         image::RgbImage::from_pixel(901,601,image::Rgb([90,180,10])).save(&original).unwrap();
+        image::RgbImage::from_pixel(90,60,image::Rgb([90,180,10])).save(folder.join("preview.jpg")).unwrap();
         assert_ne!(original_scene_cover(&record, &cache).unwrap(), first);
         assert_eq!(fs::read_dir(cache).unwrap().count(), 2);
     }
@@ -901,7 +963,7 @@ mod tests {
         let first = video_poster(&source, &cache).unwrap();
         let bytes = base64::engine::general_purpose::STANDARD.decode(first.split_once(',').unwrap().1).unwrap();
         let image = image::load_from_memory(&bytes).unwrap();
-        assert_eq!((image.width(), image.height()), (560, 1240));
+        assert_eq!((image.width(), image.height()), (1280,720));
         assert_eq!(video_poster(&source, &cache).unwrap(), first);
         assert_eq!(fs::read_dir(cache).unwrap().count(), 1);
     }

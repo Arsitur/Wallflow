@@ -1,5 +1,6 @@
 mod wallpaper;
 mod covers;
+mod cover_cache;
 mod focus;
 mod engine_config;
 mod engine_query;
@@ -234,6 +235,7 @@ pub fn run() {
             wallpaper::list_wallpapers,
             wallpaper::gallery_snapshot,
             wallpaper::wallpaper_preview,
+            wallpaper::rebuild_cover_cache,
             wallpaper::apply_wallpaper,
             diagnostics::frontend_log,
             diagnostics::get_logs,

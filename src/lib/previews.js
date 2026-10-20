@@ -1,8 +1,9 @@
 import { invoke } from '@tauri-apps/api/core';
 
 // Keep decode work bounded and let the closest visible cards load first.
-export function createPreviewLoader(fetchPreview, concurrency = 2, capacity = 100) {
+export function createPreviewLoader(fetchPreview, concurrency = 2, capacity = 100, byteBudget = 24 * 1024 * 1024) {
   const cache = new Map();
+  let cachedBytes = 0;
   const pending = new Map();
   const queue = [];
   let running = 0;
@@ -13,8 +14,17 @@ export function createPreviewLoader(fetchPreview, concurrency = 2, capacity = 10
       running++;
       Promise.resolve().then(() => fetchPreview(job.id)).then(data => {
         if (data != null) {
-          cache.set(job.key, data);
-          if (cache.size > capacity) cache.delete(cache.keys().next().value);
+          // Conservative UTF-16 budget as panorama JPEG sizes vary widely.
+          const size = data.length * 2;
+          if (size <= byteBudget) {
+            cache.set(job.key, data);
+            cachedBytes += size;
+            while (cache.size > capacity || cachedBytes > byteBudget) {
+              const oldest = cache.keys().next().value;
+              cachedBytes -= cache.get(oldest).length * 2;
+              cache.delete(oldest);
+            }
+          }
         }
         job.resolve(data);
       }, job.reject).finally(() => {

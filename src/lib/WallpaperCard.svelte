@@ -1,11 +1,13 @@
 <script>
   import { onDestroy } from "svelte";
   import { coverLoader } from "./previews.js";
+  import { coverPosition } from "./coverMotion.js";
   export let wallpaper;
   export let offset = 0;
   export let active = false;
   export let motion = 0;
   export let gap = 8;
+  export let amazingAnimations = true;
   export let onApply;
   let thumbnail = null;
   let cover = null;
@@ -49,6 +51,7 @@
   onDestroy(() => cancelCoverRequest());
   $: coverLoading = wallpaper.preview_available && !coverReady && !failed && !coverImageFailed;
   $: abs = Math.abs(offset);
+  $: imagePosition = coverPosition(offset, amazingAnimations);
   $: scale = Math.max(0.22, Math.pow(0.86, abs));
   // Sum half-widths of adjacent scaled cards, then add an explicit pixel gap.
   $: translate =
@@ -76,6 +79,7 @@
       <img
         class={`pointer-events-none absolute inset-0 h-full w-full object-cover ${!failed && !coverImageFailed ? "scale-110 blur-md" : ""}`}
         alt=""
+        style={`object-position:${imagePosition}% center`}
         src={thumbnail}
         draggable="false"
         decoding="async"
@@ -86,6 +90,7 @@
       <img
         class={`pointer-events-none absolute inset-0 h-full w-full object-cover transition-opacity duration-150 motion-reduce:transition-none ${coverReady ? "opacity-100" : "opacity-0"}`}
         alt=""
+        style={`object-position:${imagePosition}% center`}
         src={cover}
         draggable="false"
         decoding="async"
