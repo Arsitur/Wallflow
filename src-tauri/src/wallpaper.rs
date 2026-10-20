@@ -730,7 +730,9 @@ mod tests {
         fn new() -> Self {
             let path = std::env::temp_dir().join(format!("wallflow-test-{}-{}-{}", std::process::id(), timestamp(SystemTime::now()), NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)));
             fs::create_dir_all(&path).unwrap();
-            Self(path)
+            // Windows runners may expose TEMP through an 8.3 alias. Use the
+            // same canonical root as the project records built by these tests.
+            Self(path.canonicalize().unwrap())
         }
         fn project(&self, relative: &str, extra: &str) -> PathBuf {
             let path = self.0.join(relative);
@@ -945,9 +947,11 @@ mod tests {
     #[test]
     #[cfg(windows)]
     fn control_waits_for_success_and_reports_a_failed_process() {
-        let executable = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32/WindowsPowerShell/v1.0/powershell.exe");
-        run_control(&executable, &["-NoProfile", "-NonInteractive", "-Command", "exit 0"]).unwrap();
-        assert!(run_control(&executable, &["-NoProfile", "-NonInteractive", "-Command", "exit 7"]).unwrap_err().contains("failed"));
+        // Test exit handling without a cold PowerShell/.NET startup consuming
+        // the real command timeout on a busy CI machine.
+        let executable = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32/where.exe");
+        run_control(&executable, &["/?"]).unwrap();
+        assert!(run_control(&executable, &["wallflow-nonexistent-test-command-79e324f1"]).unwrap_err().contains("failed"));
     }
     #[test]
     fn display_commands_address_persistent_secondary_location_without_changing_arguments() {
