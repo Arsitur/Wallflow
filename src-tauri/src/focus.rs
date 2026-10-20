@@ -77,7 +77,7 @@ fn restore(previous: Foreground) {
         GetWindowThreadProcessId(window, &mut process_id);
         // Ignore destroyed/reused HWNDs instead of focusing an unrelated process.
         if process_id == previous.process_id && SetForegroundWindow(window) == 0 {
-            eprintln!("Windows declined restoring the previous foreground window");
+            crate::diagnostics::record("warn", "focus", "Windows declined restoring the previous foreground window");
         }
     }
 }
@@ -91,6 +91,13 @@ fn monitor_point(previous: Foreground) -> Option<(f64, f64)> {
         if IsWindow(window) == 0 { return None; }
         GetWindowThreadProcessId(window, &mut process_id);
         if process_id != previous.process_id { return None; }
+        // The desktop spans displays, so its HWND otherwise always selects the primary display.
+        let mut class = [0u16; 256];
+        let length = windows_sys::Win32::UI::WindowsAndMessaging::GetClassNameW(window, class.as_mut_ptr(), 256);
+        if matches!(String::from_utf16_lossy(&class[..length.max(0) as usize]).as_str(), "Progman" | "WorkerW") {
+            let mut point = std::mem::zeroed();
+            if windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut point) != 0 { return Some((point.x as f64, point.y as f64)); }
+        }
         let monitor = MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST);
         let mut info: MONITORINFO = std::mem::zeroed();
         info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
@@ -99,6 +106,20 @@ fn monitor_point(previous: Foreground) -> Option<(f64, f64)> {
         Some(((f64::from(rect.left) + f64::from(rect.right)) / 2.0, (f64::from(rect.top) + f64::from(rect.bottom)) / 2.0))
     }
 }
+
+#[cfg(windows)]
+pub fn exclude_from_switcher(window: &tauri::WebviewWindow) -> Result<(), String> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER};
+    let hwnd = window.hwnd().map_err(|e| e.to_string())?.0 as _;
+    unsafe {
+        let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, (style & !(WS_EX_APPWINDOW as isize)) | WS_EX_TOOLWINDOW as isize);
+        if SetWindowPos(hwnd, std::ptr::null_mut(), 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER) == 0 { return Err(std::io::Error::last_os_error().to_string()); }
+    }
+    Ok(())
+}
+#[cfg(not(windows))]
+pub fn exclude_from_switcher(_: &tauri::WebviewWindow) -> Result<(), String> { Ok(()) }
 
 #[cfg(not(windows))]
 fn foreground() -> Option<Foreground> { None }

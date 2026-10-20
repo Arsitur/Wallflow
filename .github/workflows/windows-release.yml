@@ -1,0 +1,54 @@
+name: Windows installer
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install frontend dependencies
+        run: npm ci
+      - name: Check release version
+        env:
+          RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+        run: npm run release:check
+      - name: Check frontend
+        run: npm run check
+      - name: Test frontend
+        run: npm test
+      - name: Test native code
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked --lib
+      - name: Build installer and prepare a draft release for version tags
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          args: --bundles nsis -- --locked
+          tagName: ${{ github.event_name == 'push' && github.ref_type == 'tag' && github.ref_name || '' }}
+          releaseName: ${{ github.event_name == 'push' && github.ref_type == 'tag' && 'Wallflow v__VERSION__' || '' }}
+          releaseDraft: true
+          prerelease: false
+          uploadUpdaterJson: false
+          uploadWorkflowArtifacts: true
+          releaseBody: |
+            Download the Windows x64 **-setup.exe** below and run it.
+            Requires Windows 10/11 and Steam + Wallpaper Engine, installed separately.
+            No Node.js, Rust, terminal or source download is needed.
+
+            Start Wallpaper Engine, launch Wallflow, then press **Ctrl+Alt+G**.
+            Wallflow starts silently in the system tray. Right-click its icon for Settings.
+            Optional: enable **Start with Windows** in Settings for silent sign-in launch.

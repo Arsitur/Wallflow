@@ -11,6 +11,8 @@ pub struct EngineConfig {
     pub current: HashMap<u32, String>,
     pub monitors: HashMap<String, u32>,
     pub monitor_playlists: HashMap<u32, Playlist>,
+    pub properties: HashMap<String, Value>,
+    pub layout: u32,
 }
 
 pub fn normalize_path(value: &str) -> String {
@@ -36,6 +38,10 @@ impl EngineConfig {
             .ok_or("Cannot determine the active Wallpaper Engine profile")?.1;
         let general = &profile["general"];
         let mut config = Self::default();
+        config.layout = general.pointer("/wallpaperconfig/layout").and_then(Value::as_u64).unwrap_or(0) as u32;
+        if let Some(properties) = profile["wproperties"].as_object() {
+            config.properties = properties.iter().map(|(file, value)| (normalize_path(file), value.clone())).collect();
+        }
         if let Some(playlists) = general["playlists"].as_array() {
             for playlist in playlists {
                 let Some(name) = playlist["name"].as_str().filter(|name| !name.is_empty()) else { continue; };
@@ -66,6 +72,22 @@ impl EngineConfig {
     }
 
     pub fn monitor_index(&self, name: &str) -> Option<u32> { self.monitors.get(&normalize_path(name)).copied() }
+
+    pub fn wallpaper_monitor(&self, physical: u32) -> u32 {
+        // Clone and stretch have one shared renderer. Other selectedwallpapers
+        // entries remain on disk but cannot receive CLI wallpaper commands.
+        if matches!(self.layout, 1 | 2) { 0 } else { physical }
+    }
+
+    pub fn display_mode(&self) -> &'static str {
+        match self.layout { 1 => "stretch", 2 => "clone", _ => "per-monitor" }
+    }
+
+    pub fn properties_for(&self, file: &Path, monitor: u32) -> Option<Value> {
+        let file = normalize_path(&file.to_string_lossy());
+        self.properties.get(&file)?.get(format!("Monitor{monitor}"))
+            .filter(|value| value.is_object()).cloned()
+    }
 
     pub fn playlist(&self, name: &str) -> Option<Playlist> {
         // One shared membership on every display, including unsaved additions to this named playlist.
@@ -104,6 +126,53 @@ mod tests {
     fn does_not_mix_profiles_when_multiple_users_exist() {
         let value = json!({"Alice":{"general":{}},"Bob":{"general":{}}});
         assert!(EngineConfig::parse(&value, "unknown").is_err());
+    }
+    #[test]
+    fn clone_and_stretch_ignore_dormant_secondary_wallpaper_entries() {
+        for layout in [0, 1, 2] {
+            let value = json!({"User":{"general":{"wallpaperconfig":{
+                "layout":layout, "selectedwallpapers":{"Monitor0":{"file":"active"},"Monitor1":{"file":"dormant"}}
+            }}, "wproperties":{"active":{"Monitor0":{"volume":0}},"dormant":{"Monitor1":{"volume":100}}}}});
+            let config = EngineConfig::parse(&value, "User").unwrap();
+            let renderer = config.wallpaper_monitor(1);
+            assert_eq!(renderer, if layout == 0 { 1 } else { 0 });
+            let active = &config.current[&renderer];
+            assert_eq!(active, if layout == 0 { "dormant" } else { "active" });
+            assert_eq!(config.properties_for(Path::new(active), renderer).unwrap()["volume"], if layout == 0 { 100 } else { 0 });
+        }
+    }
+    #[test]
+    fn saved_properties_keep_their_display_and_normalize_extended_paths() {
+        let value = json!({"User":{"general":{}, "wproperties":{
+            "C:/Steam/project/scene.pkg": {"Monitor0":{"alignment":1,"volume":0}, "Monitor1":{"alignment":2,"rate":42}}
+        }}});
+        let config = EngineConfig::parse(&value, "User").unwrap();
+        assert_eq!(config.properties_for(Path::new(r"\\?\C:\Steam\project\scene.pkg"), 1), Some(json!({"alignment":2,"rate":42})));
+        assert_eq!(config.properties_for(Path::new("c:/steam/project/scene.pkg"), 0), Some(json!({"alignment":1,"volume":0})));
+        assert!(config.properties_for(Path::new("c:/steam/project/scene.pkg"), 2).is_none());
+        assert!(config.properties_for(Path::new("c:/steam/other/scene.pkg"), 1).is_none());
+    }
+    #[test]
+    #[ignore = "set WALLFLOW_ENGINE_TEST_DIR to an installed Wallpaper Engine directory; read-only"]
+    fn installed_configuration_resolves_display_settings() {
+        let folder = std::env::var_os("WALLFLOW_ENGINE_TEST_DIR").expect("WALLFLOW_ENGINE_TEST_DIR is required");
+        let config = EngineConfig::read(&Path::new(&folder).join("wallpaper64.exe")).unwrap();
+        assert!(!config.monitors.is_empty());
+        for (display, index) in &config.monitors { assert_eq!(config.monitor_index(display), Some(*index)); }
+        assert!(!config.playlists.is_empty());
+        for playlist in &config.playlists {
+            let combined = config.playlist(&playlist.name).unwrap();
+            let mut seen = std::collections::HashSet::new();
+            let saved: Vec<_> = playlist.items.iter().filter(|file| seen.insert(normalize_path(file))).cloned().collect();
+            assert!(combined.items.starts_with(&saved));
+        }
+        for (file, displays) in &config.properties {
+            for (display, properties) in displays.as_object().unwrap() {
+                if let Some(index) = display.strip_prefix("Monitor").and_then(|index| index.parse::<u32>().ok()) {
+                    assert_eq!(config.properties_for(Path::new(file), index), Some(properties.clone()));
+                }
+            }
+        }
     }
     #[test]
     fn shares_named_membership_across_monitors_including_unsaved_additions() {

@@ -4,7 +4,7 @@ use base64::Engine;
 use image::{codecs::jpeg::JpegEncoder, DynamicImage, ImageReader};
 use serde::Serialize;
 use serde_json::Value;
-use std::{collections::{HashMap, hash_map::DefaultHasher}, fs, hash::{Hash, Hasher}, path::{Path, PathBuf}, process::{Command, Stdio}, sync::Mutex, time::{SystemTime, UNIX_EPOCH}};
+use std::{collections::{HashMap, hash_map::DefaultHasher}, fs, hash::{Hash, Hasher}, path::{Path, PathBuf}, process::{Command, Stdio}, sync::{Mutex, atomic::{AtomicBool, Ordering}}, time::{SystemTime, UNIX_EPOCH}};
 use tauri::{Manager, State};
 use crate::engine_config::{EngineConfig, normalize_path};
 
@@ -23,13 +23,25 @@ pub struct WallpaperItem {
     added_at: u64,
 }
 #[derive(Clone)]
-struct WallpaperRecord { public: WallpaperItem, target: PathBuf, preview: Option<PathBuf> }
+struct WallpaperRecord { public: WallpaperItem, target: PathBuf, preview: Option<PathBuf>, project: Option<PathBuf> }
 
 #[derive(Default)]
 pub struct Gallery {
     records: Mutex<HashMap<String, WallpaperRecord>>,
     engine: Mutex<Option<PathBuf>>,
     playlist: Mutex<Option<String>>,
+    operation: Mutex<()>,
+    quitting: AtomicBool,
+}
+
+pub fn quit(app: tauri::AppHandle) {
+    app.state::<Gallery>().quitting.store(true, Ordering::Release);
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<Gallery>();
+        // Let an in-flight audio guard restore the Windows mixer before exit.
+        let _operation = state.operation.lock();
+        app.exit(0);
+    });
 }
 
 pub fn initialize(app: &tauri::AppHandle) -> Result<Vec<String>, String> {
@@ -66,6 +78,11 @@ pub fn playlist_names(app: &tauri::AppHandle) -> Result<Vec<String>, String> {
     Ok(names)
 }
 
+pub fn display_mode(app: &tauri::AppHandle) -> Result<&'static str, String> {
+    let executable = app.state::<Gallery>().engine.lock().map_err(|e| e.to_string())?.clone().ok_or("Wallpaper Engine not found")?;
+    Ok(EngineConfig::read(&executable)?.display_mode())
+}
+
 fn matches_file(record: &WallpaperRecord, file: &str) -> bool {
     let file = normalize_path(file);
     let target = normalize_path(&record.target.to_string_lossy());
@@ -87,19 +104,39 @@ fn imported_image(file: &str) -> Option<WallpaperRecord> {
         preview_available: true, preview_revision: format!("{}-{}", metadata.len(), metadata.modified().map(timestamp).unwrap_or(0)),
         added_at: metadata.created().or_else(|_| metadata.modified()).map(timestamp).unwrap_or(0),
     };
-    Some(WallpaperRecord { public: item, target: target.clone(), preview: Some(target) })
+    Some(WallpaperRecord { public: item, target: target.clone(), preview: Some(target), project: None })
+}
+
+fn reconcile_playlist_records(records: &mut HashMap<String, WallpaperRecord>, files: impl IntoIterator<Item = String>) {
+    let mut seen = std::collections::HashSet::new();
+    for file in files {
+        if !seen.insert(normalize_path(&file)) { continue; }
+        if records.values().any(|record| matches_file(record, &file)) { continue; }
+        let folder = Path::new(&file).parent();
+        let installed = folder.and_then(|folder| {
+            let source = if folder.parent().and_then(Path::file_name).is_some_and(|name| name == STEAM_APP_ID) { "workshop" } else { "local" };
+            project(folder, source).filter(|record| matches_file(record, &file))
+        });
+        if let Some(record) = installed.or_else(|| imported_image(&file)) {
+            crate::diagnostics::record("info", "scan", format!("Discovered playlist item {} without a full rescan", record.public.id));
+            records.insert(record.public.id.clone(), record);
+        } else {
+            crate::diagnostics::record("warn", "scan", format!("Playlist item is unavailable or unsupported: {file}"));
+        }
+    }
 }
 
 fn filter_records(records: &HashMap<String, WallpaperRecord>, files: Option<&[String]>) -> Vec<WallpaperItem> {
-    let mut items = ordered_items(records);
-    if let Some(files) = files {
-        items.retain(|item| files.iter().any(|file| matches_file(&records[&item.id], file)));
-    }
-    items
+    let Some(files) = files else { return ordered_items(records); };
+    let mut seen = std::collections::HashSet::new();
+    files.iter().filter_map(|file| records.values().find(|record| matches_file(record, file)))
+        .filter(|record| seen.insert(&record.public.id)).map(|record| record.public.clone()).collect()
 }
 
 fn current_wallpaper(executable: &Path, monitor: u32) -> Option<String> {
-    wallpaper_output(&crate::engine_query::query(executable, monitor)?)
+    let output = crate::engine_query::query(executable, monitor).and_then(|bytes| wallpaper_output(&bytes));
+    if output.is_none() { crate::diagnostics::record("warn", "engine.query", format!("No live wallpaper response for Monitor{monitor}; using saved configuration")); }
+    output
 }
 
 fn wallpaper_output(bytes: &[u8]) -> Option<String> {
@@ -135,11 +172,12 @@ fn active_record(records: &HashMap<String, WallpaperRecord>, live: Option<&str>,
 #[derive(Serialize)]
 pub struct GallerySnapshot {
     items: Vec<WallpaperItem>, active_id: Option<String>, playlist: Option<String>, monitor: u32,
+    display_mode: &'static str,
 }
 
 #[tauri::command]
-pub async fn gallery_snapshot(app: tauri::AppHandle, window: tauri::WebviewWindow) -> Result<GallerySnapshot, String> {
-    let monitor_name = window.current_monitor().map_err(|e| e.to_string())?.and_then(|monitor| monitor.name().cloned()).unwrap_or_default();
+pub async fn gallery_snapshot(app: tauri::AppHandle) -> Result<GallerySnapshot, String> {
+    let monitor_name = crate::target_monitor(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
         let gallery = app.state::<Gallery>();
         let needs_scan = gallery.records.lock().map_err(|e| e.to_string())?.is_empty();
@@ -150,25 +188,24 @@ pub async fn gallery_snapshot(app: tauri::AppHandle, window: tauri::WebviewWindo
         }
         let executable = gallery.engine.lock().map_err(|e| e.to_string())?.clone().ok_or("Wallpaper Engine not found")?;
         let config = EngineConfig::read(&executable)?;
-        let monitor = config.monitor_index(&monitor_name).or_else(|| if config.current.len() <= 1 { config.current.keys().next().copied().or(Some(0)) } else { None })
+        let physical = config.monitor_index(&monitor_name).or_else(|| single_monitor(&config))
             .ok_or("Cannot match the current display with Wallpaper Engine")?;
+        let monitor = config.wallpaper_monitor(physical);
+        let display_mode = config.display_mode();
         let playlist = gallery.playlist.lock().map_err(|e| e.to_string())?.clone();
         let selected = playlist.as_ref().map(|name| config.playlist(name)
-            .ok_or_else(|| format!("Playlist '{name}' no longer exists. Right-click to choose another."))).transpose()?;
+            .ok_or_else(|| format!("Playlist '{name}' no longer exists. Choose another from Settings in the tray menu."))).transpose()?;
         let live = current_wallpaper(&executable, monitor);
         // WE may flush a recent selection while processing the query. Read its current state again.
         let current = EngineConfig::read(&executable).ok().and_then(|latest| latest.current.get(&monitor).cloned())
             .or_else(|| config.current.get(&monitor).cloned());
         let mut records = gallery.records.lock().map_err(|e| e.to_string())?;
-        for file in config.playlists.iter().chain(config.monitor_playlists.values()).flat_map(|playlist| &playlist.items) {
-            if !records.values().any(|record| matches_file(record, file)) {
-                if let Some(record) = imported_image(file) { records.insert(record.public.id.clone(), record); }
-            }
-        }
+        reconcile_playlist_records(&mut records, config.playlists.iter().chain(config.monitor_playlists.values()).flat_map(|playlist| playlist.items.iter().cloned()));
         let items = filter_records(&records, selected.as_ref().map(|playlist| playlist.items.as_slice()));
         let active_id = active_record(&records, live.as_deref(), current.as_deref())
             .filter(|id| items.iter().any(|item| &item.id == id));
-        Ok(GallerySnapshot { items, active_id, playlist, monitor })
+        crate::diagnostics::record("info", "snapshot", format!("Display {monitor_name} (Monitor{physical}) -> renderer Monitor{monitor}; mode={display_mode}; playlist={playlist:?}; {} items; active={active_id:?}; live query={}", items.len(), live.is_some()));
+        Ok(GallerySnapshot { items, active_id, playlist, monitor, display_mode })
     }).await.map_err(|e| e.to_string())?
 }
 
@@ -282,7 +319,7 @@ fn project(folder: &Path, source: &str) -> Option<WallpaperRecord> {
         }).unwrap_or_default() },
         added_at,
     };
-    Some(WallpaperRecord { public: item, target, preview })
+    Some(WallpaperRecord { public: item, target, preview, project: Some(json_path) })
 }
 
 fn scan_wallpapers() -> (HashMap<String, WallpaperRecord>, Option<PathBuf>) {
@@ -319,6 +356,7 @@ fn scan_roots(roots: Vec<PathBuf>) -> (HashMap<String, WallpaperRecord>, Option<
 pub async fn list_wallpapers(state: State<'_, Gallery>) -> Result<Vec<WallpaperItem>, String> {
     let (records, engine) = tauri::async_runtime::spawn_blocking(scan_wallpapers).await.map_err(|e| e.to_string())?;
     let items = ordered_items(&records);
+    crate::diagnostics::record("info", "scan", format!("Found {} wallpapers; engine={engine:?}", items.len()));
     *state.records.lock().map_err(|e| e.to_string())? = records;
     *state.engine.lock().map_err(|e| e.to_string())? = engine;
     Ok(items)
@@ -423,35 +461,157 @@ pub async fn wallpaper_preview(id: String, quality: Option<String>, state: State
     let record = state.records.lock().map_err(|e| e.to_string())?.get(&id).cloned();
     let Some(record) = record else { return Ok(None); };
     let cache_dir = app.path().app_cache_dir().ok().map(|dir| dir.join("previews"));
-    tauri::async_runtime::spawn_blocking(move || {
+    let preview_id = id.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
         let detailed = quality.as_deref() == Some("high");
         if detailed && record.public.kind == "scene" {
             if let Some(data) = cache_dir.as_deref().and_then(|dir| original_scene_cover(&record, dir)) { return Ok(Some(data)); }
+            crate::diagnostics::record("debug", "preview", format!("{}: scene artwork unavailable; using author preview", record.public.id));
         }
         if detailed && record.public.kind == "video" {
             if let Some(data) = cache_dir.as_deref().and_then(|dir| video_poster(&record.target, dir)) { return Ok(Some(data)); }
+            crate::diagnostics::record("debug", "preview", format!("{}: video frame unavailable; using author preview", record.public.id));
         }
         let Some(path) = record.preview else { return Ok(None); };
         if detailed { image_preview(&path, cache_dir, true) } else { preview_data(&path, cache_dir) }
-    }).await.map_err(|e| e.to_string())?
+    }).await.map_err(|e| e.to_string())?;
+    if let Err(error) = &result { crate::diagnostics::record("warn", "preview", format!("{preview_id}: {error}")); }
+    result
 }
 
 #[tauri::command]
-pub fn apply_wallpaper(id: String, monitor: u8, state: State<'_, Gallery>) -> Result<(), String> {
-    if monitor > 7 { return Err("Invalid monitor index".into()); }
-    let target = state.records.lock().map_err(|e| e.to_string())?
-        .get(&id).map(|r| r.target.clone()).ok_or("Wallpaper not found in current local scan")?;
+pub async fn apply_wallpaper(id: String, monitor: u32, app: tauri::AppHandle) -> Result<(), String> {
+    // Pin the original selection's display before a reopened gallery can move.
+    let display = crate::target_monitor(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = apply(&app, &id, monitor, &display);
+        if let Err(error) = &result { crate::diagnostics::record("error", "apply", error); }
+        result
+    }).await.map_err(|e| e.to_string())?
+}
+
+fn apply(app: &tauri::AppHandle, id: &str, monitor: u32, display: &str) -> Result<(), String> {
+    let state = app.state::<Gallery>();
+    let _operation = state.operation.lock().map_err(|e| e.to_string())?;
+    if state.quitting.load(Ordering::Acquire) { return Err("Wallflow is quitting".into()); }
+    let record = state.records.lock().map_err(|e| e.to_string())?
+        .get(id).cloned().ok_or("Wallpaper not found in current local scan")?;
+    let target = &record.target;
     if !target.is_file() { return Err("Wallpaper was moved or deleted".into()); }
     let executable = state.engine.lock().map_err(|e| e.to_string())?
         .clone().ok_or("Wallpaper Engine installation was not found in Steam libraries")?;
     if !executable.is_file() { return Err("Wallpaper Engine executable no longer exists".into()); }
-    let mut command = engine_command(&executable);
-    command.args(["-control", "openWallpaper", "-file"])
-        .arg(&target)
-        .arg("-monitor")
-        .arg(monitor.to_string())
-        .spawn().map_err(|e| format!("Couldn't send command to Wallpaper Engine: {e}"))?;
+    let config = EngineConfig::read(&executable)?;
+    if config.monitor_index(display).or_else(|| single_monitor(&config)).map(|physical| config.wallpaper_monitor(physical)) != Some(monitor) {
+        return Err("The target display changed. Reopen Wallflow before selecting a wallpaper.".into());
+    }
+    let identity = launch_target(target);
+    let properties = config.properties_for(&identity, monitor);
+    let launch = command_target(&record, &identity);
+    if launch != identity { crate::diagnostics::record("debug", "apply", "Using project metadata to preserve the Unicode wallpaper filename"); }
+    let preserve = crate::settings::preserve_playback(app);
+    crate::audio_transition::protect(&executable, preserve, || {
+        if crate::settings::sync_playlist(app) {
+            if let Some(selected) = selected_playlist(app) {
+                if config.monitor_playlists.get(&monitor).map(|playlist| &playlist.name) != Some(&selected) {
+                    open_playlist(&executable, &config, &selected, monitor)?;
+                }
+            }
+        }
+        // WE keys saved settings by the actual wallpaper file and ordinary Windows paths.
+        let file = launch.to_string_lossy();
+        let file = file.strip_prefix(r"\\?\").unwrap_or(&file);
+        run_display_control(&executable, monitor, &["-control", "openWallpaper", "-file", file])?;
+        restore_properties(&executable, properties, monitor)?;
+        if !preserve {
+            run_control(&executable, &["-control", "play"])?;
+            run_control(&executable, &["-control", "unmute"])?;
+        }
+        Ok(())
+    })?;
+    crate::diagnostics::record("info", "apply", format!("Applied {id} on Monitor{monitor}; preserved playback={preserve}"));
     Ok(())
+}
+
+fn single_monitor(config: &EngineConfig) -> Option<u32> {
+    if config.current.len() <= 1 { config.current.keys().next().copied().or(Some(0)) } else { None }
+}
+
+fn launch_target(target: &Path) -> PathBuf {
+    if target.file_name().is_some_and(|name| name.eq_ignore_ascii_case("project.json")) {
+        if let Some(parent) = target.parent() {
+            if let Some(file) = fs::read(target).ok().and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                .and_then(|json| json["file"].as_str().map(str::to_owned))
+                .and_then(|file| path_in_folder(parent, &file)) { return file; }
+        }
+    }
+    target.to_owned()
+}
+
+fn command_target(record: &WallpaperRecord, identity: &Path) -> PathBuf {
+    // WE's CLI can replace non-ANSI characters with '?' even when CreateProcessW
+    // receives Unicode. Its UTF-8 project reader resolves the original media name.
+    if !identity.to_string_lossy().is_ascii() {
+        if let Some(project) = record.project.as_ref().filter(|path| path.is_file() && path.to_string_lossy().is_ascii()) { return project.clone(); }
+    }
+    identity.to_owned()
+}
+
+fn restore_properties(executable: &Path, properties: Option<Value>, monitor: u32) -> Result<(), String> {
+    if let Some(properties) = properties.filter(|value| value.as_object().is_some_and(|object| !object.is_empty())) {
+        crate::diagnostics::record("debug", "properties", format!("Restoring {} saved properties on Monitor{monitor}", properties.as_object().unwrap().len()));
+        run_display_control(executable, monitor, &["-control", "applyProperties", "-properties", &format!("RAW~({properties})~END")])?;
+    }
+    Ok(())
+}
+
+fn open_playlist(executable: &Path, config: &EngineConfig, name: &str, monitor: u32) -> Result<(), String> {
+    if !config.playlists.iter().any(|playlist| playlist.name == name) { return Err("Save this playlist in Wallpaper Engine before synchronizing it.".into()); }
+    run_display_control(executable, monitor, &["-control", "openPlaylist", "-playlist", name])
+}
+
+pub fn synchronize_playlist(app: &tauri::AppHandle, name: &str, display: &str) -> Result<(), String> {
+    let state = app.state::<Gallery>();
+    let _operation = state.operation.lock().map_err(|e| e.to_string())?;
+    if state.quitting.load(Ordering::Acquire) { return Err("Wallflow is quitting".into()); }
+    let executable = state.engine.lock().map_err(|e| e.to_string())?.clone().ok_or("Wallpaper Engine not found")?;
+    let config = EngineConfig::read(&executable)?;
+    let physical = config.monitor_index(display).or_else(|| single_monitor(&config)).ok_or("Cannot match the Settings display with Wallpaper Engine")?;
+    let monitor = config.wallpaper_monitor(physical);
+    crate::audio_transition::protect(&executable, crate::settings::preserve_playback(app), || open_playlist(&executable, &config, name, monitor))
+}
+
+fn display_args(monitor: u32, args: &[&str]) -> Vec<String> {
+    // Name WE's persistent location explicitly. Shared clone/stretch layouts
+    // are resolved to their common renderer before constructing the command.
+    args.iter().map(|arg| (*arg).to_owned()).chain(["-location".into(), format!("Monitor{monitor}")]).collect()
+}
+
+fn run_display_control(executable: &Path, monitor: u32, args: &[&str]) -> Result<(), String> {
+    let args = display_args(monitor, args);
+    run_control(executable, &args.iter().map(String::as_str).collect::<Vec<_>>())
+}
+
+fn run_control(executable: &Path, args: &[&str]) -> Result<(), String> {
+    crate::diagnostics::record("debug", "engine.command", args.join(" "));
+    let operation = args.windows(2).find(|pair| pair[0] == "-control").map(|pair| pair[1]).unwrap_or("command");
+    let location = args.windows(2).find(|pair| pair[0] == "-location").map(|pair| pair[1]).unwrap_or("all displays");
+    let mut child = engine_command(executable).args(args).spawn().map_err(|e| format!("Couldn't send command to Wallpaper Engine: {e}"))?;
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => {
+                crate::diagnostics::record("debug", "engine.result", format!("{operation} on {location} completed in {} ms", start.elapsed().as_millis()));
+                return Ok(());
+            }
+            Ok(Some(status)) => return Err(format!("Wallpaper Engine {operation} on {location} failed: {status}")),
+            Err(error) => { let _ = child.kill(); let _ = child.wait(); return Err(error.to_string()); }
+            _ if start.elapsed() > std::time::Duration::from_secs(4) => {
+                let _ = child.kill(); let _ = child.wait(); return Err(format!("Wallpaper Engine {operation} on {location} timed out"));
+            }
+            _ => std::thread::sleep(std::time::Duration::from_millis(20)),
+        }
+    }
 }
 
 fn engine_command(executable: &Path) -> Command {
@@ -463,19 +623,6 @@ fn engine_command(executable: &Path) -> Command {
         command.creation_flags(0x08000000); // CREATE_NO_WINDOW: no helper console stealing focus.
     }
     command
-}
-
-#[tauri::command]
-pub async fn resume_wallpapers(state: State<'_, Gallery>) -> Result<(), String> {
-    let executable = state.engine.lock().map_err(|e| e.to_string())?
-        .clone().ok_or("Wallpaper Engine installation was not found")?;
-    tauri::async_runtime::spawn_blocking(move || {
-        // Let the overlay disappear and the previous foreground app settle first.
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        engine_command(&executable).args(["-control", "play"]).spawn()
-            .map_err(|e| format!("Couldn't resume Wallpaper Engine: {e}"))?;
-        Ok(())
-    }).await.map_err(|e| e.to_string())?
 }
 
 #[cfg(test)]
@@ -531,6 +678,102 @@ mod tests {
         assert_eq!(ordered_items(&records).iter().map(|item| item.id.as_str()).collect::<Vec<_>>(), vec!["new-a", "new-b", "old"]);
     }
     #[test]
+    fn playlist_order_overrides_install_dates_and_ignores_duplicates_and_missing_items() {
+        let fixture = Fixture::new();
+        let mut first = project(&fixture.project("first", ""), "local").unwrap();
+        let mut second = project(&fixture.project("second", ""), "local").unwrap();
+        first.public.added_at = 100;
+        second.public.added_at = 1;
+        let files = vec![second.target.to_string_lossy().into_owned(), "missing".into(), first.target.to_string_lossy().into_owned(), second.target.to_string_lossy().into_owned()];
+        let records = HashMap::from([(first.public.id.clone(), first.clone()), (second.public.id.clone(), second.clone())]);
+        assert_eq!(filter_records(&records, Some(&files)).iter().map(|item| &item.id).collect::<Vec<_>>(), vec![&second.public.id, &first.public.id]);
+        assert_eq!(filter_records(&records, None)[0].id, first.public.id);
+    }
+    #[test]
+    fn scene_launch_uses_the_engine_settings_identity_and_rejects_project_path_escape() {
+        let fixture = Fixture::new();
+        let folder = fixture.project("scene", r#", "file":"scene.pkg""#);
+        fs::write(folder.join("scene.pkg"), "test").unwrap();
+        let target = folder.join("project.json").canonicalize().unwrap();
+        assert_eq!(launch_target(&target), folder.join("scene.pkg").canonicalize().unwrap());
+        fs::write(fixture.0.join("outside.pkg"), "test").unwrap();
+        fs::write(&target, r#"{"file":"../outside.pkg"}"#).unwrap();
+        assert_eq!(launch_target(&target), target);
+    }
+    #[test]
+    fn new_playlist_video_is_discovered_after_initial_scan_with_its_installed_workshop_id() {
+        let fixture = Fixture::new();
+        let (mut records, _) = scan_roots(vec![fixture.0.clone()]);
+        assert!(records.is_empty());
+        let folder = fixture.project("steamapps/workshop/content/431960/12345", "");
+        let filename = "Dance_極楽浄土.mp4";
+        fs::write(folder.join(filename), b"video").unwrap();
+        fs::write(folder.join("project.json"), serde_json::to_vec(&serde_json::json!({
+            "title":"New video", "type":"Video", "file":filename, "workshopid":"99999"
+        })).unwrap()).unwrap();
+        let file = folder.join(filename).to_string_lossy().into_owned();
+        reconcile_playlist_records(&mut records, vec![file.clone(), file.clone()]);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records["workshop:12345"].public.kind, "video");
+        assert_eq!(filter_records(&records, Some(&[file]))[0].id, "workshop:12345");
+    }
+    #[test]
+    fn unicode_video_uses_metadata_for_the_command_but_keeps_its_media_settings_identity() {
+        let fixture = Fixture::new();
+        let folder = fixture.project("video", "");
+        let filename = "少女映画.mp4";
+        fs::write(folder.join(filename), b"video").unwrap();
+        fs::write(folder.join("project.json"), serde_json::to_vec(&serde_json::json!({
+            "title":"Video", "type":"video", "file":filename
+        })).unwrap()).unwrap();
+        let mut record = project(&folder, "local").unwrap();
+        let identity = launch_target(&record.target);
+        assert_eq!(identity, folder.join(filename).canonicalize().unwrap());
+        assert_eq!(command_target(&record, &identity), folder.join("project.json").canonicalize().unwrap());
+        let mut config = EngineConfig::default();
+        config.properties.insert(normalize_path(&identity.to_string_lossy()), serde_json::json!({"Monitor0":{"volume":0}}));
+        assert_eq!(config.properties_for(&identity, 0).unwrap()["volume"], 0);
+        record.project = None;
+        assert_eq!(command_target(&record, &identity), identity);
+        let ascii = folder.join("video.mp4");
+        fs::write(&ascii, b"video").unwrap();
+        assert_eq!(command_target(&record, &ascii), ascii);
+    }
+    #[test]
+    #[ignore = "set WALLFLOW_PLAYLIST_TEST_FILE to an installed wallpaper file; read-only"]
+    fn installed_playlist_item_is_discovered_without_a_rescan() {
+        let file = std::env::var("WALLFLOW_PLAYLIST_TEST_FILE").expect("WALLFLOW_PLAYLIST_TEST_FILE is required");
+        let mut records = HashMap::new();
+        reconcile_playlist_records(&mut records, vec![file.clone()]);
+        assert_eq!(records.len(), 1, "Installed playlist file must be discoverable");
+        let record = records.values().next().unwrap();
+        assert!(matches_file(record, &file));
+        let identity = launch_target(&record.target);
+        let command = command_target(record, &identity);
+        assert!(command.is_file());
+        eprintln!("Discovered {}; command target {}", record.public.id, command.display());
+    }
+    #[test]
+    #[cfg(windows)]
+    fn control_waits_for_success_and_reports_a_failed_process() {
+        let executable = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32/WindowsPowerShell/v1.0/powershell.exe");
+        run_control(&executable, &["-NoProfile", "-NonInteractive", "-Command", "exit 0"]).unwrap();
+        assert!(run_control(&executable, &["-NoProfile", "-NonInteractive", "-Command", "exit 7"]).unwrap_err().contains("failed"));
+    }
+    #[test]
+    fn display_commands_address_persistent_secondary_location_without_changing_arguments() {
+        for args in [
+            vec!["-control", "openWallpaper", "-file", "C:/A wallpaper/scene.pkg"],
+            vec!["-control", "openPlaylist", "-playlist", "Playlist & name"],
+            vec!["-control", "applyProperties", "-properties", r#"RAW~({"volume":0})~END"#],
+        ] {
+            let command = display_args(1, &args);
+            assert_eq!(&command[..args.len()], args.as_slice());
+            assert_eq!(&command[args.len()..], ["-location", "Monitor1"]);
+            assert!(!command.iter().any(|arg| arg == "-monitor"));
+        }
+    }
+    #[test]
     fn playlist_membership_matches_scene_files_and_keeps_empty_playlists_empty() {
         let fixture = Fixture::new();
         let folder = fixture.project("scene", "");
@@ -580,6 +823,7 @@ mod tests {
         for monitor in config.current.keys() {
             let output = crate::engine_query::query(&executable, *monitor).expect("live console query must succeed");
             let file = wallpaper_output(&output).unwrap_or_else(|| panic!("live console response: {:?}", String::from_utf8_lossy(&output)));
+            eprintln!("Monitor{monitor}: {file}");
             assert!(Path::new(&normalize_path(&file)).is_file(), "{file}");
         }
     }

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createPreviewLoader } from '../src/lib/previews.js';
+import { createPreviewLoader, createProgressiveCoverLoader } from '../src/lib/previews.js';
 
 const nextTurn = () => new Promise(resolve => setImmediate(resolve));
 
@@ -87,4 +87,101 @@ test('scrolling reprioritizes queued source covers without restarting requests',
   assert.deepEqual(started, ['busy', 'right']);
   finish.get('right')(); await right; await nextTurn();
   finish.get('left')(); await left;
+});
+
+test('progressive covers publish the thumbnail first and reopen cached high resolution directly', async () => {
+  const finish = new Map();
+  const calls = [];
+  const loader = createProgressiveCoverLoader((id, quality) => {
+    calls.push(`${quality}:${id}`);
+    return new Promise(resolve => finish.set(quality, resolve));
+  });
+  const states = [];
+  loader.request('scene', 0, 'v1', state => states.push(state));
+  await nextTurn();
+  assert.deepEqual(calls, ['low:scene', 'high:scene']);
+  finish.get('low')('thumbnail');
+  await nextTurn();
+  assert.deepEqual(states.at(-1), { thumbnail: 'thumbnail', cover: null, failed: false });
+  finish.get('high')('original');
+  await nextTurn();
+  assert.deepEqual(states.at(-1), { thumbnail: 'thumbnail', cover: 'original', failed: false });
+  const reopened = [];
+  loader.request('scene', 0, 'v1', state => reopened.push(state));
+  assert.deepEqual(reopened, [{ thumbnail: null, cover: 'original', failed: false }]);
+  assert.equal(calls.length, 2);
+});
+
+test('slow source extraction does not block the next quick preview', async () => {
+  const started = [];
+  const finish = new Map();
+  const loader = createProgressiveCoverLoader((id, quality) => {
+    const key = `${quality}:${id}`;
+    started.push(key);
+    return new Promise(resolve => finish.set(key, resolve));
+  }, 1);
+  loader.request('first', 0, 'v1', () => {});
+  const second = [];
+  loader.request('second', 1, 'v1', state => second.push(state));
+  await nextTurn();
+  finish.get('low:first')('first-preview');
+  await nextTurn();
+  assert.ok(started.includes('low:second'));
+  assert.ok(!started.includes('high:second'));
+  finish.get('low:second')('second-preview');
+  await nextTurn();
+  assert.equal(second.at(-1).thumbnail, 'second-preview');
+  assert.equal(second.at(-1).cover, null);
+  finish.get('high:first')('first-cover');
+  await nextTurn();
+  finish.get('high:second')('second-cover');
+  await nextTurn();
+  assert.equal(second.at(-1).cover, 'second-cover');
+});
+
+test('cancelled revisions cannot update a card and late thumbnails cannot replace its cover', async () => {
+  const jobs = [];
+  const loader = createProgressiveCoverLoader((id, quality) => new Promise(resolve => jobs.push({ quality, resolve })));
+  const oldStates = [];
+  const cancel = loader.request('same', 0, 'old', state => oldStates.push(state));
+  await nextTurn();
+  cancel();
+  const currentStates = [];
+  loader.request('same', 0, 'new', state => currentStates.push(state));
+  await nextTurn();
+  jobs[0].resolve('old-preview');
+  jobs[1].resolve('old-cover');
+  await nextTurn();
+  assert.equal(oldStates.length, 1);
+  assert.equal(currentStates.at(-1).cover, null);
+  jobs[3].resolve('new-cover');
+  await nextTurn();
+  jobs[2].resolve('late-preview');
+  await nextTurn();
+  assert.deepEqual(currentStates.at(-1), { thumbnail: 'late-preview', cover: 'new-cover', failed: false });
+});
+
+test('unavailable high resolution keeps the preview and can retry without caching a missing cover', async () => {
+  for (const failure of ['missing', 'error']) {
+    let highCalls = 0;
+    let lowCalls = 0;
+    const loader = createProgressiveCoverLoader(async (id, quality) => {
+      if (quality === 'low') { lowCalls++; return 'preview'; }
+      if (++highCalls === 1) {
+        if (failure === 'error') throw new Error('extraction failed');
+        return null;
+      }
+      return 'recovered-cover';
+    });
+    const states = [];
+    loader.request('scene', 0, 'v1', state => states.push(state));
+    await nextTurn();
+    assert.deepEqual(states.at(-1), { thumbnail: 'preview', cover: null, failed: true });
+    loader.request('scene', 0, 'v1', state => states.push(state));
+    await nextTurn();
+    assert.equal(states.at(-1).cover, 'recovered-cover');
+    assert.equal(states.at(-1).failed, false);
+    assert.equal(lowCalls, 1);
+    assert.equal(highCalls, 2);
+  }
 });

@@ -68,6 +68,7 @@ pub fn query(executable: &Path, monitor: u32) -> Option<Vec<u8>> {
         // launching the GUI executable into it directly still produces an empty response.
         // The bridge executes a fixed command with a checked literal executable name and an integer.
         // No playlist name, wallpaper path or user text is ever interpreted as shell syntax.
+        // Use the same explicit location ID as the mutation commands.
         let binary = match executable.file_name()?.to_str()? {
             "wallpaper64.exe" => "wallpaper64.exe",
             "wallpaper32.exe" => "wallpaper32.exe",
@@ -75,7 +76,7 @@ pub fn query(executable: &Path, monitor: u32) -> Option<Vec<u8>> {
         };
         let bridge = std::path::PathBuf::from(std::env::var_os("SystemRoot")?).join("System32").join("cmd.exe");
         let application = wide(bridge.as_os_str());
-        let mut command = wide(std::ffi::OsStr::new(&format!("\"{}\" /d /q /c .\\{binary} -control getWallpaper -monitor {monitor}", bridge.display())));
+        let mut command = wide(std::ffi::OsStr::new(&format!("\"{}\" /d /q /c .\\{binary} -control getWallpaper -location Monitor{monitor}", bridge.display())));
         // CMD mistakes the extended-length local prefix for a UNC working directory.
         let parent = executable.parent()?.to_string_lossy();
         let directory = wide(std::ffi::OsStr::new(parent.strip_prefix(r"\\?\").unwrap_or(&parent)));

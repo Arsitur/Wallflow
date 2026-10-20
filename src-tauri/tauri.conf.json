@@ -32,6 +32,19 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
+    "publisher": "Arsitur",
+    "homepage": "https://github.com/Arsitur/Wallflow",
+    "shortDescription": "A quick wallpaper selector for Wallpaper Engine",
+    "licenseFile": "../LICENSE",
+    "windows": {
+      "webviewInstallMode": { "type": "downloadBootstrapper", "silent": true },
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["English"],
+        "displayLanguageSelector": false,
+        "installerHooks": "installer/hooks.nsh"
+      }
+    },
     "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.ico"]
   }
 }

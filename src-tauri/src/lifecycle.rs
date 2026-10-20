@@ -1,4 +1,24 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Mutex;
+
+// A ready WebView is not an open request. Keep an explicit shortcut/tray request
+// made during startup, but never open just because the frontend was loaded.
+#[derive(Default)]
+pub struct FrontendReadiness(Mutex<(bool, bool)>);
+impl FrontendReadiness {
+    pub fn request_open(&self) -> bool {
+        let mut state = self.0.lock().unwrap();
+        if state.0 { true } else { state.1 = true; false }
+    }
+    pub fn ready(&self) -> bool {
+        let mut state = self.0.lock().unwrap();
+        state.0 = true;
+        std::mem::take(&mut state.1)
+    }
+    pub fn cancel_pending(&self) -> bool {
+        std::mem::take(&mut self.0.lock().unwrap().1)
+    }
+}
 
 #[derive(Default)]
 pub struct Lifecycle {
@@ -21,6 +41,14 @@ impl Lifecycle {
         self.preparing.store(false, Ordering::Release);
         Some(self.epoch.fetch_add(1, Ordering::AcqRel) + 1)
     }
+    pub fn dismiss(&self) -> u64 {
+        // An auxiliary window takes over focus. Invalidate pending animations,
+        // including an earlier explicit close that wanted to restore another app.
+        self.restore.store(false, Ordering::Release);
+        self.preparing.store(false, Ordering::Release);
+        self.closing.store(true, Ordering::Release);
+        self.epoch.fetch_add(1, Ordering::AcqRel) + 1
+    }
     pub fn present(&self, epoch: u64) -> bool {
         self.epoch.load(Ordering::Acquire) == epoch && !self.is_closing() && self.preparing.swap(false, Ordering::AcqRel)
     }
@@ -33,6 +61,24 @@ impl Lifecycle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn starting_or_reloading_the_frontend_does_not_request_a_gallery() {
+        let state = FrontendReadiness::default();
+        assert!(!state.ready());
+        assert!(!state.ready());
+        assert!(state.request_open());
+    }
+    #[test]
+    fn a_shortcut_before_readiness_is_kept_and_can_be_cancelled() {
+        let state = FrontendReadiness::default();
+        assert!(!state.request_open());
+        assert!(state.ready());
+        assert!(!state.ready());
+        let state = FrontendReadiness::default();
+        assert!(!state.request_open());
+        assert!(state.cancel_pending());
+        assert!(!state.ready());
+    }
     #[test]
     fn stale_animation_cannot_hide_a_reopened_gallery() {
         let state = Lifecycle::default();
@@ -67,5 +113,19 @@ mod tests {
         let cancelled = state.open();
         state.close(false);
         assert!(!state.present(cancelled));
+    }
+    #[test]
+    fn settings_dismissal_cancels_pending_present_and_previous_focus_restore() {
+        let state = Lifecycle::default();
+        let opening = state.open();
+        let dismissed = state.dismiss();
+        assert!(!state.present(opening));
+        assert_eq!(state.finish(dismissed), Some(false));
+        state.open();
+        let closing = state.close(true).unwrap();
+        let dismissed = state.dismiss();
+        assert_eq!(state.finish(closing), None);
+        assert_eq!(state.finish(dismissed), Some(false));
+        assert!(!state.is_preparing());
     }
 }

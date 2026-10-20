@@ -1,115 +1,127 @@
-# Wallflow v0.1 🗡️
+# Wallflow ✨
 
-An animated, auditable wallpaper selector for **Wallpaper Engine on Windows 11**.
+A smooth wallpaper selector for **Wallpaper Engine on Windows**. Open it, scroll until something looks good, apply it, and get back to your desktop.
 
-- Transparent, image-only carousel with slim portrait previews and smooth scaling.
-- Browse installed Steam Workshop wallpapers and local Wallpaper Engine projects. The Arthurian playlist is selected by default when present; right-click the carousel to choose a playlist or all installed wallpapers. Settings have no overlay button or keyboard shortcut.
-- Deduplicated library sorted by local installation/creation date, newest first; built-in default projects are excluded.
-- Browse one combined library with smooth mouse wheel, trackpad, drag or arrow-key navigation. Press R to rescan.
-- Cards bend slightly during scrolling and settle back afterward; reduced-motion preferences disable this effect. Each cover has a centered loading spinner until its image is ready.
-- `Ctrl + Alt + G` toggles the popup globally by default; change the shortcut in Settings. `Esc` closes Settings first, then hides the selector.
-- `Enter` applies the centered wallpaper; one click on any visible card applies that wallpaper immediately using Wallpaper Engine's *official* CLI.
-- Opens on the monitor of the previously focused app, matches that display to Wallpaper Engine, and centers its current wallpaper on each opening. Applying a wallpaper uses that monitor, restores the previous app focus, then resumes playback.
-- Full monitor width with a centered transparent window (66% of monitor height), plus fade/scale animations. Native resize and DPI changes finish while hidden before the frontend acknowledges display readiness.
+[**Download for Windows**](https://github.com/Arsitur/Wallflow/releases/latest) · [Getting started](#getting-started) · [Controls](#controls) · [Developer guide](docs/DEVELOPMENT.md)
 
-## Requirements
+## Demo
 
-- Windows 10/11, Steam + Wallpaper Engine installed.
-- Wallpaper Engine already running before applying wallpapers.
-- Node.js 20+, npm.
-- Rust/MSVC toolchain for building native Tauri app, including Microsoft C++ Build Tools and WebView2 runtime.
-- Latest Tauri global shortcut plugin may require Rust 1.90+. Run `rustup update` if necessary.
+**Demo video goes here.** I will add a quick showcase of Wallflow in action.
 
-See Tauri prerequisites: https://v2.tauri.app/start/prerequisites/
+<!-- Replace the paragraph above with your Wallflow demo video link after uploading it. -->
 
-## Quick start (PowerShell)
+## From the author
 
-```powershell
-# Extract ZIP to a normal folder, open PowerShell there
-npm install
-rustup update stable
-npm run tauri dev
-```
+I watched [this YouTube video](https://www.youtube.com/watch?v=kYZ5mkGuQEg), saw that smooth wallpaper selector, and really wanted something like it on my own desktop. So I built this.
 
-Once it starts, press `Ctrl + Alt + G` from anywhere. It remains in memory when hidden. Click the Wallflow icon in the notification area to reopen the gallery. Right-click it and choose **Quit Wallflow** to exit entirely. Esc and Alt + F4 hide the gallery and restore the previous foreground window. Switching focus to another application dismisses the gallery without changing the new app focus.
+Normally, I do not vibe-code entire applications. This time I was tired, wanted the thing to exist, and decided to see what GPT-6.1 could do. The result is an entirely vibe-coded app, tested and adjusted until it worked the way I wanted.
 
-For frontend development (the browser shows an empty state; installed wallpapers require Tauri):
+Future maintainers: I am sorry. Some of the Rust still looks like an infinite line of functions to me. My future job is in its coffin, screaming for help. 💀
 
-```powershell
-npm install
-npm run dev
-```
+I tested it briefly on **Windows 11 with two monitors**, and it works on my setup. Everyone else's setup: 🫡
 
-Then visit http://127.0.0.1:1420. Demo wallpapers and the standalone concept preview have been removed.
+— [Arsitur](https://github.com/Arsitur)
 
-## Build your own Windows app
+## What it does
 
-```powershell
-npm run tauri build
-```
+- A transparent, animated carousel with smooth scrolling, dragging and keyboard navigation.
+- Workshop wallpapers and local Wallpaper Engine projects, with playlists shown in their saved order.
+- Quick blurred cover previews while higher-resolution artwork loads.
+- Opens on the display you are using and starts at its current wallpaper when that wallpaper belongs to your selected playlist.
+- Preserves playback and mute state by default, restores saved wallpaper properties, and can synchronize your playlist with Wallpaper Engine.
+- Starts quietly in the system tray. Choose a wallpaper and the selector fades away immediately while the change finishes in the background.
+- Separate Settings and Logs / Debugger windows, a configurable shortcut, and optional silent startup with Windows.
 
-After successful compilation, the NSIS installer should be in `src-tauri/target/release/bundle/nsis/`. Do **not** install an unsigned binary from a stranger. Your own locally built binary is much easier to inspect.
+## Getting started
 
-## How it works
+You need **Steam and Wallpaper Engine installed**, plus some downloaded wallpapers. Wallflow is a companion to Wallpaper Engine; both applications need to be running for normal use.
 
-1. `src-tauri/src/wallpaper.rs` locates Steam from `HKCU\Software\Valve\Steam`, the default install locations, and `steamapps/libraryfolders.vdf`.
-2. It reads `steamapps/workshop/content/431960/*/project.json` and local project metadata without altering files.
-3. The JavaScript/Svelte frontend loads one 560 × 1240 cover per wallpaper through a two-request priority queue, nearest cards first. For scenes, Rust reads original artwork from the installed project or PKGV archive and decodes TEXV textures (RGBA, BC1/BC2/BC3, embedded images and LZ4 blocks). Candidate artwork is compared with the author's preview to avoid isolated layers and masks. Only the portrait crop is resized; cached covers reopen directly without thumbnail-to-HQ swaps. Images use their original file; videos use a frame from an existing FFmpeg installation. Unsupported scenes fall back to the author's preview. Source path, size and modification time invalidate cached images. Wallpaper scripts and effects are not executed for covers.
-4. Every display uses the same named playlist membership, including unsaved additions to that playlist on any display. Each opening queries Wallpaper Engine through an invisible Windows pseudoconsole and a fixed system-console bridge (its CLI attaches to its parent's console), with saved configuration as fallback. The current wallpaper is centered only when it belongs to the selected playlist.
-5. On Apply, the backend invokes the **installed** `wallpaper64.exe` or `wallpaper32.exe` directly with:
+1. Download **`Wallflow_<version>_x64-setup.exe`** from [Releases](https://github.com/Arsitur/Wallflow/releases/latest), under **Assets**.
+2. Run the installer. It installs for your Windows account and handles WebView2 automatically if it is missing.
+3. Start Wallpaper Engine, then launch Wallflow. Wallflow stays in the notification area without opening the selector.
+4. Press **Ctrl + Alt + G**.
+5. Right-click the Wallflow tray icon → **Settings** to choose a playlist or record your own shortcut.
 
-```text
--control openWallpaper -file <validated-wallpaper-path> -monitor 0
-```
+**No Node.js, Rust or terminal setup is needed to use the installer.**
 
-Apply and playback use `std::process::Command` with separated arguments. The read-only current-wallpaper query uses the Windows system `cmd.exe` as an invisible console owner with a fixed command, a checked executable name and a numeric monitor index; user text and wallpaper paths never become shell commands. Official CLI documentation: https://help.wallpaperengine.io/en/functionality/cli.html
+Wallflow communicates with Wallpaper Engine through its installed executable. Those commands can start Wallpaper Engine if it is closed; starting Engine yourself first gives the most predictable experience. Launching Wallflow into the tray alone does not explicitly start Engine.
 
-## Security model
+For automatic launch at sign-in, enable **Start with Windows** in Settings and choose **Save**. It is off by default, and the selector stays hidden at startup. A shortcut to the executable in your Windows Startup folder also works; use one startup method.
 
-- No external assets, cloud access, telemetry, auto-updates, administrator rights, or startup registry modifications.
-- No third-party executable bundled in this source ZIP.
-- Native access is restricted to local installed wallpaper assets, cache files and your installed Wallpaper Engine executable.
-- Wallpaper project `file` paths are canonicalized and checked to remain inside their project directory.
-- Arbitrary user-entered executable paths are **not** accepted for wallpaper application.
-- Browser preview cannot access the filesystem or Wallpaper Engine.
-- NPM and Cargo fetch ordinary **development dependencies** when you build; inspect dependency changes before distributing binaries.
+To update, quit Wallflow from the tray and run the new installer. To uninstall, use Windows Settings → Apps.
 
-## Limitations in v0.1
+The builds are currently unsigned, so Windows may show a SmartScreen / unknown-publisher prompt. Download availability depends on a published release; the source-code ZIP is for building the app yourself.
 
-- Source-code app, with frontend and native automated checks; Wallpaper Engine interaction still needs validation against your installation.
-- Detects wallpapers only in discoverable Steam libraries and expected project folders, not every manually imported video/image.
-- Original source covers are generated once in the background, then reused from disk and memory. Scene covers show static source artwork, so shader effects and the final arrangement of complex animated layers can differ. Unsupported texture formats fall back to the author's preview. FFmpeg is optional for video frames; the app never installs it automatically. Installation dates use local folder creation times, with modification time as a fallback; copied/restored libraries may have different dates.
-- May not restore customized Wallpaper Engine *per-wallpaper property presets*. We should support `-preset` next.
-- No click-through desktop effect, audio previews or file drag/drop yet. If the active wallpaper is outside the selected playlist, the carousel starts at its first item instead of including unrelated wallpapers.
-- The toggle requires the Wallflow process to remain running; it does not register automatic startup.
-- Popup transparency can vary with Windows compositor, GPU driver and WebView2.
+## Controls
 
-## Roadmap
+| Gesture | Action |
+| --- | --- |
+| **Ctrl + Alt + G** | Show / hide the selector; configurable in Settings |
+| Mouse wheel, trackpad, or drag left / right | Browse wallpapers |
+| **← / →** or **A / D** | Move one wallpaper |
+| Left-click a card | Apply that wallpaper |
+| Right-click anywhere in the selector | Apply the **currently centered** wallpaper |
+| **Enter / Space** | Apply the centered wallpaper |
+| **R** | Rescan the installed library |
+| **Esc / Alt + F4** | Hide the selector |
+| Switch to another application | Hide the selector |
+| Left-click the tray icon | Open the selector |
+| Right-click the tray icon | Settings, Logs / Debugger, or Quit |
 
-- [ ] Test on Windows 11 against real Wallpaper Engine library; fix any integration quirks
-- [x] Persistent preview thumbnail cache + virtualized rendering
-- [ ] Saved wallpaper-specific presets and favorites
-- [x] Detect the focused monitor and its currently selected wallpaper
-- [x] Tray icon with open and quit actions
-- [x] Settings popup for current playlists and persistent, conflict-checked hotkeys
-- [ ] Start-with-Windows **opt-in**
-- [ ] Custom animations, adjustable tilt, themes, blur and glow
-- [ ] Keyboard/controller accessibility and performance benchmark
-- [ ] Signed release builds after security review
+To change the global shortcut, focus its field in Settings and press the combination you want. Choose **Save** to apply it.
 
-## Key files
+## Wallpaper Engine settings I use
 
-- `src/App.svelte` - main experience
-- `src/lib/WallpaperCard.svelte` - image-only animated cards styled with Tailwind
-- Adjust `CARD_GAP_PX` near the top of `src/App.svelte` to change spacing: `0` touches, positive values add space, negative values overlap. The default is `8` CSS pixels.
-- `src/app.css` - Tailwind import and transparent document base styles
-- `src-tauri/src/wallpaper.rs` - Steam scan, preview, Wallpaper Engine CLI
-- `src-tauri/capabilities/default.json` - Tauri capabilities
-- `src/lib/previews.js` - bounded preview queue and memory cache
-- `src-tauri/src/engine_config.rs` - named playlists and Wallpaper Engine display mapping
-- `src-tauri/src/engine_query.rs` - invisible console capture for the live wallpaper query
-- `src-tauri/src/covers.rs` - bounded read-only PKG/TEX artwork decoding; format reference: [RePKG](https://github.com/notscuffed/repkg)
-- `src-tauri/src/focus.rs` - previous app focus and monitor detection
-- `src-tauri/src/lifecycle.rs` - animation lifecycle and stale-close protection
+For anyone wondering, this is the playback setup I tested with:
 
-License: MIT (see LICENSE).
+![Wallpaper Engine performance settings used for testing](docs/assets/wallpaper-engine-performance.png)
+
+| Wallpaper Engine → Settings → Performance | Value |
+| --- | --- |
+| Other application focused | Keep running |
+| Other application maximized | Pause per monitor |
+| Other application fullscreen | Pause per monitor |
+| Other application playing audio | Keep running |
+| Display asleep | Stop (free memory) |
+| Laptop on battery | Pause |
+
+These are the settings I tested; other combinations are unverified.
+
+**Playlist timers still belong to Wallpaper Engine.** A very short automatic-change interval can switch the wallpaper while you are browsing the selector. For the nicest experience, use a longer interval or disable automatic changes.
+
+## A few things to know
+
+- **Two monitors work on my setup.** More than two monitors are untested. Windows 11 is the tested OS; other Windows setups have not been verified by me.
+- **Use the Steam version of Wallpaper Engine.** Other installation types, including unofficial copies, are untested and unsupported.
+- **Loose video files are not picked up by the library scan.** For a personal video, create a local project in the Wallpaper Engine editor, then add it to your playlist. Video wallpapers packaged as projects are supported.
+- **Wallpaper Engine's built-in default wallpapers are intentionally excluded.**
+- **Save your playlist in Wallpaper Engine after editing it**, including after adding a scene. Some additions can appear live before saving, but saving is needed for reliable synchronization of a named playlist.
+- **Scene covers are static artwork previews.** They can differ from the fully animated scene, and some projects fall back to their author's preview. Higher-resolution video covers use FFmpeg if it is already installed; it is optional.
+- **Settings → Preserve playback and mute state** is enabled by default. Leave it on if you want your pause / mute choices to carry across wallpaper changes.
+- If a change fails, check **Logs / Debugger** from the tray menu. Logs include local file paths, so review them before sharing.
+
+## For the full desktop look
+
+It looks ridiculously good with [TranslucentTB](https://github.com/TranslucentTB/TranslucentTB) and a clean desktop.
+
+I use **Ctrl + Space** to toggle desktop icons through Wallpaper Engine. Configure that in Wallpaper Engine's hotkey settings; it is separate from Wallflow's shortcut. TranslucentTB is optional and installed separately.
+
+## Built with
+
+**Svelte · Tailwind CSS · Vite · Tauri 2 · Rust**
+
+Curious about the code, or want to build an installer? See the [developer guide](docs/DEVELOPMENT.md), including the path from a wallpaper click to the actual CLI command.
+
+## Forks, fixes and expectations
+
+You are welcome to fork this, adapt it, and make it work for your setup.
+
+I made it because I wanted it. I am not planning to actively maintain this project or provide ongoing support, so if you want to work on it: go for it. Future maintainers, once again, my condolences.
+
+## License and a small request
+
+Released under the [MIT License](LICENSE).
+
+If you use this in a professional context, I would appreciate a credit to **Arsitur** somewhere. That is enough to fulfill my inner Buddhist monk.
+
+Good luck, mon ami. 🫡

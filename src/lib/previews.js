@@ -12,8 +12,10 @@ export function createPreviewLoader(fetchPreview, concurrency = 2, capacity = 10
       const job = queue.shift();
       running++;
       Promise.resolve().then(() => fetchPreview(job.id)).then(data => {
-        cache.set(job.key, data);
-        if (cache.size > capacity) cache.delete(cache.keys().next().value);
+        if (data != null) {
+          cache.set(job.key, data);
+          if (cache.size > capacity) cache.delete(cache.keys().next().value);
+        }
         job.resolve(data);
       }, job.reject).finally(() => {
         pending.delete(job.key);
@@ -56,5 +58,38 @@ export function createPreviewLoader(fetchPreview, concurrency = 2, capacity = 10
   return load;
 }
 
-// A single source-quality cover: no blurry thumbnail or different image while scrolling.
-export const loadCover = createPreviewLoader(id => invoke('wallpaper_preview', { id, quality: 'high' }), 2, 96);
+export function createProgressiveCoverLoader(fetchPreview, concurrency = 2, capacity = 96) {
+  // Cheap author previews have their own queue so scene extraction cannot hold them up.
+  const thumbnails = createPreviewLoader(id => fetchPreview(id, 'low'), concurrency, capacity);
+  const covers = createPreviewLoader(id => fetchPreview(id, 'high'), concurrency, capacity);
+  return {
+    request(id, priority, revision, update) {
+      let active = true;
+      const cover = covers.peek(id, revision) || null;
+      let state = { thumbnail: cover ? null : thumbnails.peek(id, revision) || null, cover, failed: false };
+      const publish = changes => {
+        if (!active) return;
+        state = { ...state, ...changes };
+        update(state);
+      };
+      update(state);
+      if (!cover) {
+        if (!state.thumbnail) {
+          thumbnails(id, priority, revision).then(thumbnail => publish({ thumbnail }), () => {});
+        }
+        covers(id, priority, revision).then(
+          data => publish({ cover: data, failed: !data }),
+          () => publish({ failed: true }),
+        );
+      }
+      // Requests still populate the shared caches after a card scrolls out of view.
+      return () => { active = false; };
+    },
+    prioritize(id, priority, revision) {
+      thumbnails.prioritize(id, priority, revision);
+      covers.prioritize(id, priority, revision);
+    },
+  };
+}
+
+export const coverLoader = createProgressiveCoverLoader((id, quality) => invoke('wallpaper_preview', { id, quality }));
