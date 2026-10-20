@@ -4,7 +4,7 @@ A smooth wallpaper selector for **Wallpaper Engine on Windows**. Open it, scroll
 
 [**Download for Windows**](https://github.com/Arsitur/Wallflow/releases/latest) · [Getting started](#getting-started) · [Controls](#controls) · [Developer guide](docs/DEVELOPMENT.md)
 
-## Demo
+## 🎬 Demo
 
 **Demo video goes here.** I will add a quick showcase of Wallflow in action.
 
@@ -37,6 +37,8 @@ I tested it briefly on **Windows 11 with two monitors**, and it works on my setu
 
 You need **Steam and Wallpaper Engine installed**, plus some downloaded wallpapers. Wallflow is a companion to Wallpaper Engine; both applications need to be running for normal use.
 
+> ⚠️ **Windows SmartScreen:** The installer is unsigned, so you should expect a SmartScreen or “Unknown publisher” warning when installing Wallflow. This is a free hobby project, and I do not plan to purchase a commercial code-signing certificate for it. See [Microsoft's explanation of SmartScreen warnings](https://learn.microsoft.com/windows/apps/package-and-deploy/smartscreen-reputation) for more context.
+
 1. Download **`Wallflow_<version>_x64-setup.exe`** from [Releases](https://github.com/Arsitur/Wallflow/releases/latest), under **Assets**.
 2. Run the installer. It installs for your Windows account and handles WebView2 automatically if it is missing.
 3. Start Wallpaper Engine, then launch Wallflow. Wallflow stays in the notification area without opening the selector.
@@ -51,7 +53,7 @@ For automatic launch at sign-in, enable **Start with Windows** in Settings and c
 
 To update, quit Wallflow from the tray and run the new installer. To uninstall, use Windows Settings → Apps.
 
-The builds are currently unsigned, so Windows may show a SmartScreen / unknown-publisher prompt. Download availability depends on a published release; the source-code ZIP is for building the app yourself.
+Download availability depends on a published release; the source-code ZIP is for building the app yourself.
 
 ## Controls
 
@@ -102,7 +104,7 @@ These are the settings I tested; other combinations are unverified.
 - **Settings → Preserve playback and mute state** is enabled by default. Leave it on if you want your pause / mute choices to carry across wallpaper changes.
 - If a change fails, check **Logs / Debugger** from the tray menu. Logs include local file paths, so review them before sharing.
 
-## For the full desktop look
+## 🎨 For the full desktop look
 
 It looks ridiculously good with [TranslucentTB](https://github.com/TranslucentTB/TranslucentTB) and a clean desktop.
 
@@ -121,7 +123,7 @@ I use **Ctrl + Space** to toggle desktop icons through Wallpaper Engine. Configu
 
 You may also want to disable any options that let your wallpaper change Windows' accent color or other system colors. I ran into some questionable glitches with those enabled, so I keep them off.
 
-## Built with
+## 🛠️ Built with
 
 **Svelte · Tailwind CSS · Vite · Tauri 2 · Rust**
 
