@@ -27,6 +27,7 @@
   let toastTimer;
   let wheelTimer;
   let reducedMotion = false;
+  let amazingAnimations = true;
   let galleryEpoch = 0;
   let phase = "closed";
   let monitorIndex = 0;
@@ -51,6 +52,7 @@
       wallpapers = snapshot.items;
       playlistName = snapshot.playlist;
       monitorIndex = snapshot.monitor;
+      amazingAnimations = snapshot.amazing_animations ?? true;
       // Every opening starts at the actual wallpaper, never the previous scroll position.
       target = Math.max(
         0,
@@ -314,6 +316,8 @@
         {wallpaper}
         gap={CARD_GAP_PX}
         motion={scrollMotion}
+        viewportWidth={width}
+        amazingAnimations={amazingAnimations && !reducedMotion}
         offset={firstVisible + index - position}
         active={firstVisible + index === selectedIndex}
         onApply={apply}
