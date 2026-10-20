@@ -18,6 +18,7 @@
   let shortcutInput;
   let draftPreservePlayback = true;
   let draftSyncPlaylist = true;
+  let draftAmazingAnimations = true;
   let draftStartWithWindows = false;
   let displayMode = "per-monitor";
   const controls = [
@@ -47,6 +48,7 @@
       draftShortcut = formatShortcut(info.shortcut);
       draftPreservePlayback = info.preserve_playback;
       draftSyncPlaylist = info.sync_playlist;
+      draftAmazingAnimations = info.amazing_animations ?? true;
       draftStartWithWindows = info.start_with_windows;
       displayMode = info.display_mode;
       loaded = true;
@@ -71,6 +73,7 @@
         shortcut: draftShortcut,
         preservePlayback: draftPreservePlayback,
         syncPlaylist: draftSyncPlaylist,
+        amazingAnimations: draftAmazingAnimations,
         startWithWindows: draftStartWithWindows,
       });
       if (!disposed) await closeSettings();
@@ -185,6 +188,10 @@
     <label class="flex items-start gap-3">
       <input type="checkbox" bind:checked={draftSyncPlaylist} disabled={settingsBusy} class="mt-1 accent-white" />
       <span>Sync playlist with Wallpaper Engine<span class="mt-1 block text-xs leading-5 text-zinc-400">Applies to the monitor containing this Settings window. “All installed wallpapers” only changes the library view.</span></span>
+    </label>
+    <label class="flex items-start gap-3">
+      <input type="checkbox" bind:checked={draftAmazingAnimations} disabled={settingsBusy} class="mt-1 accent-white" />
+      <span>Amazing animations<span class="mt-1 block text-xs leading-5 text-zinc-400">Smooth parallax: preview images reveal their left, center, or right side as cards move across the carousel. Uses the existing previews and little extra memory. Respects reduced-motion settings.</span></span>
     </label>
     {#if displayMode === "clone" || displayMode === "stretch"}
       <p class="text-xs leading-5 text-zinc-400">Wallpaper Engine uses {displayMode === "clone" ? "Clone wallpaper" : "Stretch wallpaper"}. Wallpaper and playlist changes apply to all displays. To use separate wallpapers, select “Wallpaper per monitor” in Wallpaper Engine.</p>
