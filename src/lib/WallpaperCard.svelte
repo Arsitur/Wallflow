@@ -1,11 +1,14 @@
 <script>
   import { onDestroy } from "svelte";
   import { coverLoader } from "./previews.js";
+  import { imagePanPosition } from "./parallax.js";
   export let wallpaper;
   export let offset = 0;
   export let active = false;
   export let motion = 0;
   export let gap = 8;
+  export let viewportWidth = 1360;
+  export let amazingAnimations = true;
   export let onApply;
   let thumbnail = null;
   let cover = null;
@@ -55,6 +58,7 @@
     ((Math.sign(offset) * (1 - Math.pow(0.86, abs))) / 0.14) * 0.93;
   $: gapOffset = Math.sign(offset) * abs * gap;
   $: opacity = Math.min(1, Math.max(0, 12 - abs));
+  $: imagePan = amazingAnimations ? imagePanPosition(offset, viewportWidth, gap) : 50;
   function clickCard() {
     onApply(wallpaper);
   }
@@ -77,6 +81,7 @@
         class={`pointer-events-none absolute inset-0 h-full w-full object-cover ${!failed && !coverImageFailed ? "scale-110 blur-md" : ""}`}
         alt=""
         src={thumbnail}
+        style={`object-position:${imagePan}% center`}
         draggable="false"
         decoding="async"
         on:error={() => (thumbnailFailed = true)}
@@ -87,6 +92,7 @@
         class={`pointer-events-none absolute inset-0 h-full w-full object-cover transition-opacity duration-150 motion-reduce:transition-none ${coverReady ? "opacity-100" : "opacity-0"}`}
         alt=""
         src={cover}
+        style={`object-position:${imagePan}% center`}
         draggable="false"
         decoding="async"
         on:load={coverLoaded}
