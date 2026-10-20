@@ -25,6 +25,7 @@ I tested it briefly on **Windows 11 with two monitors**, and it works on my setu
 ## What it does
 
 - A transparent, animated carousel with smooth scrolling, dragging and keyboard navigation.
+- Optional **Amazing animations** setting: preview artwork pans smoothly from left to center to right as its card moves, without loading extra images. Enabled by default and respects reduced-motion preferences.
 - Workshop wallpapers and local Wallpaper Engine projects, with playlists shown in their saved order.
 - Quick blurred cover previews while higher-resolution artwork loads.
 - Opens on the display you are using and starts at its current wallpaper when that wallpaper belongs to your selected playlist.
